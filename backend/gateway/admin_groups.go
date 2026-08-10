@@ -53,6 +53,17 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 	if in.FirstTokenTimeoutSec != nil {
 		ftTimeout = a.clampFirstTokenTimeoutSec(*in.FirstTokenTimeoutSec)
 	}
+	serviceTierRules, err := normalizeServiceTierRulesJSON(in.ServiceTierRulesJSON)
+	if err != nil {
+		return nil, err
+	}
+	systemPromptRules, promptKeyIDs, err := normalizeSystemPromptRulesJSON(in.SystemPromptRulesJSON)
+	if err != nil {
+		return nil, err
+	}
+	if len(promptKeyIDs) > 0 {
+		return nil, errors.New("system prompt keys must belong to group")
+	}
 	rateResort := false
 	if in.RateResortEnabled != nil {
 		rateResort = *in.RateResortEnabled
@@ -62,23 +73,25 @@ func (a *AdminService) CreateGroup(in CreateGroupInput) (*storage.GatewayGroup, 
 		return nil, err
 	}
 	item := &storage.GatewayGroup{
-		Name:                 name,
-		Description:          strings.TrimSpace(in.Description),
-		Position:             pos,
-		Status:               storage.GatewayGroupStatusActive,
-		RateSortDirection:    dir,
-		RateResortEnabled:    rateResort,
-		ModelMappingJSON:     strings.TrimSpace(in.ModelMappingJSON),
-		ModelsJSON:           strings.TrimSpace(in.ModelsJSON),
-		ModelsMode:           mode,
-		RetryEnabled:         retryEnabled,
-		RetryCount:           retryCount,
-		FailoverEnabled:      failoverEnabled,
-		FailoverMax:          failoverMax,
-		FailoverOn4xx:        failoverOn4xx,
-		CooldownSeconds:      cooldown,
-		FirstTokenTimeoutSec: ftTimeout,
-		UserAgent:            strings.TrimSpace(in.UserAgent),
+		Name:                  name,
+		Description:           strings.TrimSpace(in.Description),
+		Position:              pos,
+		Status:                storage.GatewayGroupStatusActive,
+		RateSortDirection:     dir,
+		RateResortEnabled:     rateResort,
+		ModelMappingJSON:      strings.TrimSpace(in.ModelMappingJSON),
+		ModelsJSON:            strings.TrimSpace(in.ModelsJSON),
+		ModelsMode:            mode,
+		ServiceTierRulesJSON:  serviceTierRules,
+		SystemPromptRulesJSON: systemPromptRules,
+		RetryEnabled:          retryEnabled,
+		RetryCount:            retryCount,
+		FailoverEnabled:       failoverEnabled,
+		FailoverMax:           failoverMax,
+		FailoverOn4xx:         failoverOn4xx,
+		CooldownSeconds:       cooldown,
+		FirstTokenTimeoutSec:  ftTimeout,
+		UserAgent:             strings.TrimSpace(in.UserAgent),
 	}
 	if err := a.Groups.Create(item); err != nil {
 		return nil, err
@@ -136,6 +149,26 @@ func (a *AdminService) UpdateGroup(id uint, in UpdateGroupInput) (*storage.Gatew
 			mode = storage.GatewayModelsModeAuto
 		}
 		item.ModelsMode = mode
+	}
+	if in.ServiceTierRulesJSON != nil {
+		rules, err := normalizeServiceTierRulesJSON(*in.ServiceTierRulesJSON)
+		if err != nil {
+			return nil, err
+		}
+		item.ServiceTierRulesJSON = rules
+	}
+	if in.SystemPromptRulesJSON != nil {
+		normalizedRules, keyIDs, err := normalizeSystemPromptRulesJSON(*in.SystemPromptRulesJSON)
+		if err != nil {
+			return nil, err
+		}
+		for _, keyID := range keyIDs {
+			key, err := a.Keys.FindByID(keyID)
+			if err != nil || key.GroupID != id {
+				return nil, errors.New("system prompt keys must belong to group")
+			}
+		}
+		item.SystemPromptRulesJSON = normalizedRules
 	}
 	if in.RetryEnabled != nil {
 		item.RetryEnabled = *in.RetryEnabled

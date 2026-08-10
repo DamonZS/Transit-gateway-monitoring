@@ -763,7 +763,7 @@ func convertAnthropicToolsToResponses(tools []any) []any {
 			"type":        "function",
 			"name":        name,
 			"description": t["description"],
-			"parameters":   normalizeToolParameters(t["input_schema"]),
+			"parameters":  normalizeToolParameters(t["input_schema"]),
 			"strict":      false,
 		}
 		asChat = append(asChat, item)
@@ -809,9 +809,20 @@ func isReasoningModelName(model string) bool {
 //   - type=function_call_output → role=tool
 //   - tools：Responses 扁平 {name,parameters} → Chat 嵌套 {type,function:{name,parameters}}
 func ResponsesToOpenAIChatRequest(body []byte, model string, stream bool) ([]byte, error) {
+	out, _, err := ResponsesToOpenAIChatRequestWithToolBridge(body, model, stream)
+	return out, err
+}
+
+// ResponsesToOpenAIChatRequestWithToolBridge lowers Responses client tools and
+// returns the mapping needed to restore tool calls in the upstream response.
+func ResponsesToOpenAIChatRequestWithToolBridge(body []byte, model string, stream bool) ([]byte, ResponsesToolBridge, error) {
 	var in map[string]any
 	if err := json.Unmarshal(body, &in); err != nil {
-		return nil, fmt.Errorf("invalid responses request: %w", err)
+		return nil, ResponsesToolBridge{}, fmt.Errorf("invalid responses request: %w", err)
+	}
+	bridge, err := buildResponsesToolBridge(in)
+	if err != nil {
+		return nil, ResponsesToolBridge{}, err
 	}
 	if model == "" {
 		if m, ok := in["model"].(string); ok {
@@ -828,7 +839,7 @@ func ResponsesToOpenAIChatRequest(body []byte, model string, stream bool) ([]byt
 	case string:
 		messages = append(messages, map[string]any{"role": "user", "content": inp})
 	case []any:
-		messages = append(messages, responsesInputArrayToChatMessages(inp)...)
+		messages = append(messages, responsesInputArrayToChatMessagesWithToolBridge(inp, bridge)...)
 	default:
 		if inp != nil {
 			messages = append(messages, map[string]any{"role": "user", "content": fmt.Sprint(inp)})
@@ -851,13 +862,17 @@ func ResponsesToOpenAIChatRequest(body []byte, model string, stream bool) ([]byt
 	if v, ok := asFloat(in["top_p"]); ok {
 		out["top_p"] = v
 	}
-	if tools, ok := in["tools"]; ok {
-		if converted := convertResponsesToolsToChat(tools); converted != nil {
+	if tools := responsesEffectiveTools(in); len(tools) > 0 {
+		converted, err := convertResponsesToolsToChatWithToolBridge(tools, bridge)
+		if err != nil {
+			return nil, ResponsesToolBridge{}, err
+		}
+		if converted != nil {
 			out["tools"] = converted
 		}
 	}
 	if tc, ok := in["tool_choice"]; ok {
-		out["tool_choice"] = convertResponsesToolChoiceToChat(tc)
+		out["tool_choice"] = convertResponsesToolChoiceToChatWithToolBridge(tc, bridge)
 	}
 	if r, ok := in["reasoning"].(map[string]any); ok {
 		if e, ok := r["effort"].(string); ok && e != "" {
@@ -875,12 +890,17 @@ func ResponsesToOpenAIChatRequest(body []byte, model string, stream bool) ([]byt
 	if v, ok := in["parallel_tool_calls"]; ok {
 		out["parallel_tool_calls"] = v
 	}
-	return json.Marshal(out)
+	encoded, err := json.Marshal(out)
+	return encoded, bridge, err
 }
 
 // responsesInputArrayToChatMessages 将 Responses input 数组转为 chat messages。
 // 连续 function_call 合并为一条 assistant.tool_calls（对齐 Chat 多工具一轮形态）。
 func responsesInputArrayToChatMessages(inp []any) []any {
+	return responsesInputArrayToChatMessagesWithToolBridge(inp, ResponsesToolBridge{})
+}
+
+func responsesInputArrayToChatMessagesWithToolBridge(inp []any, bridge ResponsesToolBridge) []any {
 	var messages []any
 	var pendingToolCalls []any
 
@@ -904,11 +924,11 @@ func responsesInputArrayToChatMessages(inp []any) []any {
 		case map[string]any:
 			typ, _ := item["type"].(string)
 			switch typ {
-			case "function_call", "custom_tool_call", "tool_call":
-				if tc := responsesFunctionCallToChatToolCall(item); tc != nil {
+			case "function_call", "custom_tool_call", "tool_search_call", "tool_call":
+				if tc := responsesFunctionCallToChatToolCallWithToolBridge(item, bridge); tc != nil {
 					pendingToolCalls = append(pendingToolCalls, tc)
 				}
-			case "function_call_output", "tool_result", "custom_tool_call_output":
+			case "function_call_output", "tool_result", "custom_tool_call_output", "tool_search_output":
 				flushToolCalls()
 				callID, _ := item["call_id"].(string)
 				if callID == "" {
@@ -938,12 +958,33 @@ func responsesInputArrayToChatMessages(inp []any) []any {
 }
 
 func responsesFunctionCallToChatToolCall(item map[string]any) map[string]any {
+	return responsesFunctionCallToChatToolCallWithToolBridge(item, ResponsesToolBridge{})
+}
+
+func responsesFunctionCallToChatToolCallWithToolBridge(item map[string]any, bridge ResponsesToolBridge) map[string]any {
 	callID, _ := item["call_id"].(string)
 	if callID == "" {
 		callID, _ = item["id"].(string)
 	}
+	typ, _ := item["type"].(string)
 	name, _ := item["name"].(string)
+	if typ == "tool_search_call" {
+		name = responsesToolSearchProxyName
+	}
+	if namespace, _ := item["namespace"].(string); namespace != "" {
+		name = bridge.chatToolName(name, namespace)
+	}
 	args, _ := item["arguments"].(string)
+	if typ == "custom_tool_call" {
+		input, _ := item["input"].(string)
+		encoded, _ := json.Marshal(map[string]any{"input": input})
+		args = string(encoded)
+	}
+	if typ == "tool_search_call" && strings.TrimSpace(args) == "" {
+		if encoded, err := json.Marshal(item["arguments"]); err == nil && string(encoded) != "null" {
+			args = string(encoded)
+		}
+	}
 	if strings.TrimSpace(args) == "" {
 		args = "{}"
 	}
@@ -1075,9 +1116,14 @@ func responsesOutputToChatToolContent(output any) string {
 
 // convertResponsesToolsToChat Responses 扁平 tools → Chat 嵌套 function tools。
 func convertResponsesToolsToChat(tools any) []any {
-	arr, ok := tools.([]any)
-	if !ok || len(arr) == 0 {
-		return nil
+	arr, _ := tools.([]any)
+	out, _ := convertResponsesToolsToChatWithToolBridge(arr, ResponsesToolBridge{})
+	return out
+}
+
+func convertResponsesToolsToChatWithToolBridge(arr []any, bridge ResponsesToolBridge) ([]any, error) {
+	if len(arr) == 0 {
+		return nil, nil
 	}
 	var out []any
 	for _, raw := range arr {
@@ -1094,8 +1140,45 @@ func convertResponsesToolsToChat(tools any) []any {
 		if typ == "" {
 			typ = "function"
 		}
-		if strings.HasPrefix(typ, "web_search") {
+		if strings.HasPrefix(typ, "web_search") || typ == "image_generation" {
 			// chat 侧通常无原生 web_search；跳过或透传
+			continue
+		}
+		if typ == "tool_search" {
+			if !bridge.ToolSearchEnabled {
+				continue
+			}
+			out = append(out, map[string]any{"type": "function", "function": map[string]any{
+				"name": responsesToolSearchProxyName, "description": "Search and load tools for the current task.",
+				"parameters": responsesToolSearchSchema,
+			}})
+			continue
+		}
+		if typ == "namespace" {
+			namespace, _ := t["name"].(string)
+			for _, rawChild := range responsesNamespaceChildren(t) {
+				child, _ := rawChild.(map[string]any)
+				if child == nil || child["type"] != "function" {
+					continue
+				}
+				childName, _ := child["name"].(string)
+				if namespace == "" || childName == "" {
+					continue
+				}
+				flat := bridge.chatToolName(childName, namespace)
+				params := child["parameters"]
+				if params == nil {
+					params = child["input_schema"]
+				}
+				if params == nil {
+					params = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
+				fn := map[string]any{"name": flat, "parameters": params}
+				if d, ok := child["description"]; ok {
+					fn["description"] = d
+				}
+				out = append(out, map[string]any{"type": "function", "function": fn})
+			}
 			continue
 		}
 		name, _ := t["name"].(string)
@@ -1103,6 +1186,9 @@ func convertResponsesToolsToChat(tools any) []any {
 			continue
 		}
 		params := t["parameters"]
+		if typ == "custom" {
+			params = responsesCustomToolSchema
+		}
 		if params == nil {
 			params = t["input_schema"]
 		}
@@ -1126,21 +1212,31 @@ func convertResponsesToolsToChat(tools any) []any {
 		out = append(out, item)
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
 }
 
 // convertResponsesToolChoiceToChat Responses tool_choice → Chat tool_choice。
 func convertResponsesToolChoiceToChat(tc any) any {
+	return convertResponsesToolChoiceToChatWithToolBridge(tc, ResponsesToolBridge{})
+}
+
+func convertResponsesToolChoiceToChatWithToolBridge(tc any, bridge ResponsesToolBridge) any {
 	switch v := tc.(type) {
 	case string:
 		return v // auto / none / required
 	case map[string]any:
 		typ, _ := v["type"].(string)
 		switch typ {
-		case "function":
+		case "function", "custom", "tool_search":
 			name, _ := v["name"].(string)
+			if typ == "tool_search" {
+				name = responsesToolSearchProxyName
+			}
+			if namespace, _ := v["namespace"].(string); namespace != "" {
+				name = bridge.chatToolName(name, namespace)
+			}
 			if name == "" {
 				if fn, ok := v["function"].(map[string]any); ok {
 					name, _ = fn["name"].(string)
@@ -1165,6 +1261,12 @@ func convertResponsesToolChoiceToChat(tc any) any {
 
 // OpenAIChatToResponsesResponse 将 chat/completions 非流式响应转为 Responses。
 func OpenAIChatToResponsesResponse(body []byte, model string) ([]byte, error) {
+	return OpenAIChatToResponsesResponseWithToolBridge(body, model, ResponsesToolBridge{})
+}
+
+// OpenAIChatToResponsesResponseWithToolBridge restores custom, tool_search and
+// namespace calls after a Responses request was lowered to Chat Completions.
+func OpenAIChatToResponsesResponseWithToolBridge(body []byte, model string, bridge ResponsesToolBridge) ([]byte, error) {
 	var in map[string]any
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("invalid chat response: %w", err)
@@ -1211,13 +1313,7 @@ func OpenAIChatToResponsesResponse(body []byte, model string) ([]byte, error) {
 		name, _ := fn["name"].(string)
 		args, _ := fn["arguments"].(string)
 		cid, _ := tcm["id"].(string)
-		output = append(output, map[string]any{
-			"type":      "function_call",
-			"name":      name,
-			"arguments": args,
-			"call_id":   cid,
-			"id":        cid,
-		})
+		output = append(output, bridge.outputTool(name, cid, cid, args))
 	}
 	usage := map[string]any{}
 	if u, ok := in["usage"].(map[string]any); ok {

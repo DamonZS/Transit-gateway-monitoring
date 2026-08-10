@@ -27,12 +27,7 @@ func ParseOpenAIUsage(body []byte) UsageTokens {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return UsageTokens{}
 	}
-	usageObj, _ := raw["usage"].(map[string]any)
-	if usageObj == nil {
-		if data, ok := raw["data"].(map[string]any); ok {
-			usageObj, _ = data["usage"].(map[string]any)
-		}
-	}
+	usageObj, toolUsage := openAIUsageObjects(raw)
 	if usageObj == nil {
 		if hasAnyTokenField(raw) {
 			usageObj = raw
@@ -40,7 +35,52 @@ func ParseOpenAIUsage(body []byte) UsageTokens {
 			return UsageTokens{}
 		}
 	}
-	return parseUsageMapSub2API(usageObj)
+	out := parseUsageMapSub2API(usageObj)
+	mergeOpenAIImageToolUsage(&out, toolUsage)
+	return out
+}
+
+// openAIUsageObjects 兼容 Chat 顶层 usage 与 Responses 终态的 response.usage。
+func openAIUsageObjects(raw map[string]any) (usage, imageToolUsage map[string]any) {
+	usage, _ = raw["usage"].(map[string]any)
+	toolUsage, _ := raw["tool_usage"].(map[string]any)
+	if toolUsage != nil {
+		imageToolUsage, _ = toolUsage["image_gen"].(map[string]any)
+	}
+	if usage != nil {
+		return usage, imageToolUsage
+	}
+	if response, ok := raw["response"].(map[string]any); ok {
+		usage, _ = response["usage"].(map[string]any)
+		if usage != nil {
+			if toolUsage, _ := response["tool_usage"].(map[string]any); toolUsage != nil {
+				imageToolUsage, _ = toolUsage["image_gen"].(map[string]any)
+			}
+			return usage, imageToolUsage
+		}
+	}
+	if data, ok := raw["data"].(map[string]any); ok {
+		usage, _ = data["usage"].(map[string]any)
+		if usage != nil {
+			return usage, imageToolUsage
+		}
+		if response, ok := data["response"].(map[string]any); ok {
+			usage, _ = response["usage"].(map[string]any)
+			if toolUsage, _ := response["tool_usage"].(map[string]any); toolUsage != nil {
+				imageToolUsage, _ = toolUsage["image_gen"].(map[string]any)
+			}
+		}
+	}
+	return usage, imageToolUsage
+}
+
+func mergeOpenAIImageToolUsage(out *UsageTokens, imageToolUsage map[string]any) {
+	if out == nil || imageToolUsage == nil || out.ImageOutputTokens > 0 {
+		return
+	}
+	if details, ok := imageToolUsage["output_tokens_details"].(map[string]any); ok {
+		out.ImageOutputTokens = max0(mapInt(details, "image_tokens"))
+	}
 }
 
 func hasAnyTokenField(m map[string]any) bool {
@@ -313,8 +353,8 @@ func chunkHasUsage(payload []byte) bool {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return false
 	}
-	_, ok := raw["usage"].(map[string]any)
-	return ok
+	usage, toolUsage := openAIUsageObjects(raw)
+	return usage != nil || toolUsage != nil
 }
 
 // extractLastUsageObject 从原始流里找最后一个 "usage":{...} 并解析（容错异常 SSE）。

@@ -17,7 +17,6 @@ import (
 	"github.com/bejix/upstream-ops/backend/notify"
 	"github.com/bejix/upstream-ops/backend/runtimeconfig"
 	"github.com/bejix/upstream-ops/backend/storage"
-	"github.com/bejix/upstream-ops/backend/syncer"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -65,7 +64,6 @@ type Deps struct {
 	ChannelSvc    channelService
 	Monitor       monitorService
 	Dispatcher    *notify.Dispatcher
-	UpstreamSync  *syncer.Service
 	Gateway       *gateway.Service
 	GatewayGroups *storage.GatewayGroups
 	GatewayKeys   *storage.GatewayKeys
@@ -116,7 +114,6 @@ func Register(r *gin.Engine, d *Deps) {
 		registerMonitorLogs(api, d)
 		registerDashboard(api, d)
 		registerSettings(api, d)
-		registerUpstreamSync(api, d)
 		registerGatewayAdmin(api, d)
 	}
 

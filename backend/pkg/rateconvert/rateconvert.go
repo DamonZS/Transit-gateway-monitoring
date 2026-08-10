@@ -1,5 +1,5 @@
 // Package rateconvert 统一上游分组倍率换算逻辑。
-// 网关调度与上游同步账号共用，避免两套算法漂移。
+// 网关调度复用此算法，避免多处实现漂移。
 package rateconvert
 
 import "strings"

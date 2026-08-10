@@ -4,11 +4,13 @@ import type {
   GatewayProviderOption,
   GatewayRoute,
   GatewayRouteSourceKind,
+  GatewayServiceTierRule,
+  GatewaySystemPromptRule,
   RateSnapshot,
 } from "@/lib/api-types"
 
 export type MainTab = "gateway" | "providers" | "usage" | "prices"
-export type ConfigTab = "keys" | "routes" | "models"
+export type ConfigTab = "keys" | "routes" | "models" | "service-tier" | "prompt"
 
 export type ModelSourceLabel = {
   key: string
@@ -56,11 +58,27 @@ export type KeyFormState = {
 
 export type PriceFormState = {
   model_name: string
+  billing_mode: "token" | "per_request" | "image" | "video"
   input_mtok: string
   output_mtok: string
   cache_create_mtok: string
   cache_read_mtok: string
+  per_request_price: string
+  pricing_tiers: PriceTierFormState[]
+  image_price_1k: string
+  image_price_2k: string
+  image_price_4k: string
+  video_price_480p: string
+  video_price_720p: string
+  video_price_1080p: string
   enabled: boolean
+}
+
+export type PriceTierFormState = {
+  tier_label: string
+  min_tokens: string
+  max_tokens: string
+  per_request_price: string
 }
 
 export function channelGroupLabel(
@@ -332,7 +350,7 @@ export function hasRoutePauseError(route: Partial<GatewayRoute>): boolean {
   return !!(route.temp_unschedulable_reason?.trim() || route.temp_unschedulable_until)
 }
 
-/** 对齐上游同步 accountRateMultiplier：原值=源分组 ratio，非强制 1 */
+/** 对齐网关路由 accountRateMultiplier：原值=源分组 ratio，非强制 1 */
 export function routeAccountRate(
   route: Partial<GatewayRoute>,
   groups: RateSnapshot[],
@@ -461,6 +479,32 @@ export function textToIPListJSON(text: string): string {
   return JSON.stringify(lines)
 }
 
+export function parseSystemPromptRules(raw?: string): GatewaySystemPromptRule[] {
+  if (!raw?.trim()) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return []
+      const value = item as Partial<GatewaySystemPromptRule>
+      const keyIDs = [...new Set((Array.isArray(value.key_ids) ? value.key_ids : []).flatMap((keyID) => {
+        const id = Number(keyID)
+        return Number.isInteger(id) && id > 0 ? [id] : []
+      }))]
+      const keyScope = value.key_scope === "selected" ? "selected" : "all"
+      return [{
+        enabled: value.enabled !== false,
+        text: typeof value.text === "string" ? value.text : "",
+        override: value.override === true,
+        key_scope: keyScope,
+        key_ids: keyScope === "selected" ? keyIDs : [],
+      }]
+    })
+  } catch {
+    return []
+  }
+}
+
 export const MTOK = 1_000_000
 
 export function perTokenToMTok(v: number): string {
@@ -474,6 +518,53 @@ export function mTokToPerToken(s: string): number {
   const n = Number(s)
   if (!Number.isFinite(n)) return 0
   return n / MTOK
+}
+
+export function parsePriceTiers(raw?: string): PriceTierFormState[] {
+  if (!raw?.trim()) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return []
+      const tier = item as Partial<{
+        tier_label: unknown
+        min_tokens: unknown
+        max_tokens: unknown
+        per_request_price: unknown
+      }>
+      const label = typeof tier.tier_label === "string" ? tier.tier_label : ""
+      const min = Number(tier.min_tokens)
+      const max = tier.max_tokens == null ? "" : String(Number(tier.max_tokens) || 0)
+      const price = Number(tier.per_request_price)
+      return [{
+        tier_label: label,
+        min_tokens: String(Number.isFinite(min) && min >= 0 ? min : 0),
+        max_tokens: max,
+        per_request_price: String(Number.isFinite(price) && price >= 0 ? price : 0),
+      }]
+    })
+  } catch {
+    return []
+  }
+}
+
+export function serializePriceTiers(tiers: PriceTierFormState[]): string {
+  if (tiers.length === 0) return ""
+  return JSON.stringify(
+    tiers.map((tier) => {
+      const min = Number(tier.min_tokens)
+      const max = Number(tier.max_tokens)
+      return {
+        tier_label: tier.tier_label.trim(),
+        min_tokens: Number.isFinite(min) && min >= 0 ? min : 0,
+        ...(tier.max_tokens.trim() && Number.isFinite(max)
+          ? { max_tokens: max }
+          : {}),
+        per_request_price: Number(tier.per_request_price) || 0,
+      }
+    }),
+  )
 }
 export const emptyGroupForm = (): GroupFormState => ({
   name: "",
@@ -502,12 +593,67 @@ export const emptyKeyForm = (): KeyFormState => ({
   reset_quota_used: false,
 })
 
+export const defaultServiceTierRules = (): GatewayServiceTierRule[] => [
+  { tier: "all", action: "filter", models: [] },
+  { tier: "priority", action: "filter", models: [] },
+  { tier: "flex", action: "filter", models: [] },
+]
+
+export function parseServiceTierRules(raw?: string): GatewayServiceTierRule[] {
+  if (!raw?.trim()) return defaultServiceTierRules()
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return defaultServiceTierRules()
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return []
+      const value = item as Partial<GatewayServiceTierRule>
+      const tier = value.tier === "priority" || value.tier === "flex" ? value.tier : "all"
+      const action = value.action === "passthrough" || value.action === "block" || value.action === "force_priority"
+        ? value.action
+        : "filter"
+      const models = Array.isArray(value.models)
+        ? value.models.filter((model): model is string => typeof model === "string" && !!model.trim())
+        : []
+      const keyIDs = [
+        ...(Array.isArray(value.key_ids) ? value.key_ids : []),
+        value.key_id,
+      ].flatMap((keyID) => {
+        const id = Number(keyID)
+        return Number.isInteger(id) && id > 0 ? [id] : []
+      })
+      const userEmail = typeof value.user_email === "string" ? value.user_email.trim() : ""
+      const keyScope = value.key_scope === "selected" || keyIDs.length > 0 || userEmail
+        ? "selected"
+        : "all"
+      return [{
+        tier,
+        action,
+        key_scope: keyScope,
+        key_ids: [...new Set(keyIDs)],
+        user_email: userEmail || undefined,
+        models,
+      }]
+    })
+  } catch {
+    return defaultServiceTierRules()
+  }
+}
+
 export const emptyPriceForm = (): PriceFormState => ({
   model_name: "",
+  billing_mode: "token",
   input_mtok: "0",
   output_mtok: "0",
   cache_create_mtok: "0",
   cache_read_mtok: "0",
+  per_request_price: "0",
+  pricing_tiers: [],
+  image_price_1k: "0",
+  image_price_2k: "0",
+  image_price_4k: "0",
+  video_price_480p: "0",
+  video_price_720p: "0",
+  video_price_1080p: "0",
   enabled: true,
 })
 

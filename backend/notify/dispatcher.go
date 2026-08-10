@@ -108,119 +108,61 @@ func (d *Dispatcher) Dispatch(ctx context.Context, msg Message) error {
 	return d.fanout(ctx, msg, nil)
 }
 
-// DispatchRateBatch 把一次扫描收集到的多条 RateChange 按 Policy 合并 / 过滤后推送。
-//
-//   - 先按 MinChangePct 过滤掉小变动
-//   - 然后对每个通知渠道：先用它自己的 Subscriptions 切片出它关心的 changes，
-//     再按 BatchRateChanges 决定合并发送 1 条还是逐条发送
-//
-// 关键：合并消息只包含订阅匹配的子集，避免"全合并后 ModelName=” 被 groups 模式订阅过滤掉"的边界。
-func (d *Dispatcher) DispatchRateBatch(ctx context.Context, channel *storage.Channel, changes []RateChange) error {
-	return d.DispatchRateEventBatch(ctx, channel, storage.EventRateChanged, changes)
-}
-
-func (d *Dispatcher) DispatchRateEventBatch(ctx context.Context, channel *storage.Channel, event storage.NotificationEvent, changes []RateChange) error {
-	if channel == nil || len(changes) == 0 {
+// DispatchRateNotificationBatch 将一轮全渠道扫描的变化按通知渠道订阅过滤后，各发送一条汇总消息。
+func (d *Dispatcher) DispatchRateNotificationBatch(ctx context.Context, batch RateNotificationBatch) error {
+	if batch.Empty() {
 		return nil
 	}
-	policy := d.Policy()
-
-	filtered := make([]RateChange, 0, len(changes))
-	for _, c := range changes {
-		if event != storage.EventRateChanged || c.ChangePctAbove(policy.MinChangePct) {
-			filtered = append(filtered, c)
-		}
-	}
-	if len(filtered) == 0 {
-		return nil
-	}
-
-	notifyChannels, err := d.repo.ListEnabledChannels()
-	if err != nil {
+	channels, err := d.repo.ListEnabledChannels()
+	if err != nil || len(channels) == 0 {
 		return err
 	}
-	if len(notifyChannels) == 0 {
-		return nil
-	}
-
 	var errs []error
-	for i := range notifyChannels {
-		nch := notifyChannels[i]
-		subs, _ := ParseSubscriptions(nch.Subscriptions)
-
-		// 切出该通知渠道关心的 changes 子集。
-		matching := subsetForSubscriptions(channel.ID, event, filtered, subs)
-		if len(matching) == 0 {
+	for i := range channels {
+		ch := channels[i]
+		subs, _ := ParseSubscriptions(ch.Subscriptions)
+		filtered := filterRateNotificationBatch(batch, subs, d.Policy().MinChangePct)
+		if filtered.Empty() {
 			continue
 		}
-
-		if policy.BatchRateChanges {
-			merged := BuildRateBatchMessage(channel, event, matching)
-			if err := d.sendOne(ctx, &nch, merged); err != nil {
-				errs = append(errs, err)
-			}
-		} else {
-			// 用户显式关掉合并：仍按订阅切片，但逐条发。
-			for _, c := range matching {
-				single := BuildRateBatchMessage(channel, event, []RateChange{c})
-				if err := d.sendOne(ctx, &nch, single); err != nil {
-					errs = append(errs, err)
-				}
-			}
-		}
-	}
-	return errors.Join(errs...)
-}
-
-func (d *Dispatcher) DispatchRateStructureBatch(ctx context.Context, channel *storage.Channel, change RateStructureChange) error {
-	if channel == nil || len(change.Added)+len(change.Removed) == 0 {
-		return nil
-	}
-	notifyChannels, err := d.repo.ListEnabledChannels()
-	if err != nil {
-		return err
-	}
-	if len(notifyChannels) == 0 {
-		return nil
-	}
-
-	var errs []error
-	for i := range notifyChannels {
-		nch := notifyChannels[i]
-		subs, _ := ParseSubscriptions(nch.Subscriptions)
-		matching := RateStructureChange{
-			Added:   subsetForSubscriptions(channel.ID, storage.EventRateStructureChanged, change.Added, subs),
-			Removed: subsetForSubscriptions(channel.ID, storage.EventRateStructureChanged, change.Removed, subs),
-		}
-		if len(matching.Added)+len(matching.Removed) == 0 {
-			continue
-		}
-		msg := BuildRateStructureMessage(channel, matching)
-		if err := d.sendOne(ctx, &nch, msg); err != nil {
+		if err := d.sendOne(ctx, &ch, BuildRateNotificationBatchMessage(filtered)); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// subsetForSubscriptions 把 changes 过滤成"匹配 subs 订阅规则"的子集。
-// subs 为空（订阅一切）→ 返回全部。
-func subsetForSubscriptions(upstreamID uint, event storage.NotificationEvent, changes []RateChange, subs []Subscription) []RateChange {
-	if len(subs) == 0 {
-		return changes
-	}
-	out := make([]RateChange, 0, len(changes))
-	for _, c := range changes {
-		stub := Message{
-			Event:     event,
-			ChannelID: upstreamID,
-			ModelName: c.GroupName,
+func filterRateNotificationBatch(batch RateNotificationBatch, subs []Subscription, minChangePct float64) RateNotificationBatch {
+	filter := func(items []ChannelRateChange, event storage.NotificationEvent, applyThreshold bool) []ChannelRateChange {
+		out := make([]ChannelRateChange, 0, len(items))
+		for _, item := range items {
+			if applyThreshold && !item.Change.ChangePctAbove(minChangePct) {
+				continue
+			}
+			if len(subs) > 0 && !matchesRateBatchSubscription(subs, event, item) {
+				continue
+			}
+			out = append(out, item)
 		}
-		if AnyMatch(subs, stub) {
-			out = append(out, c)
-		}
+		return out
 	}
-	return out
+	return RateNotificationBatch{
+		Changed: filter(batch.Changed, storage.EventRateChanged, true),
+		Added:   filter(batch.Added, storage.EventRateAdded, false),
+		Removed: filter(batch.Removed, storage.EventRateRemoved, false),
+	}
+}
+
+func matchesRateBatchSubscription(subs []Subscription, event storage.NotificationEvent, item ChannelRateChange) bool {
+	msg := Message{Event: event, ChannelID: item.ChannelID, ModelName: item.Change.GroupName}
+	if AnyMatch(subs, msg) {
+		return true
+	}
+	if event == storage.EventRateAdded || event == storage.EventRateRemoved {
+		msg.Event = storage.EventRateStructureChanged
+		return AnyMatch(subs, msg)
+	}
+	return false
 }
 
 // suppress 判断是否要按 cooldown 跳过本次发送。
@@ -260,7 +202,7 @@ func (d *Dispatcher) suppress(msg Message) bool {
 	return !ok
 }
 
-// fanout 广播给所有启用的通知渠道（仅给 Dispatch 用，DispatchRateBatch 自己控订阅切片）。
+// fanout 广播给所有启用的通知渠道（仅给 Dispatch 用；全渠道倍率通知自行完成订阅筛选）。
 //
 // extraFilter 可选：用于在 ParseSubscriptions / AnyMatch 之后做额外裁剪；
 // 当前没有调用方传入，保留参数位是为以后扩展。

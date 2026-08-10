@@ -115,11 +115,6 @@ const notificationEventOptions: Array<{ id: string; label: string; events: Notif
     label: "分组变动",
     events: ["rate_structure_changed", "rate_added", "rate_removed"],
   },
-  {
-    id: "upstream_sync_group_changed",
-    label: "同步分组变动",
-    events: ["upstream_sync_group_changed"],
-  },
   { id: "announcement", label: "上游公告", events: ["announcement"] },
   { id: "login_failed", label: "登录失败", events: ["login_failed"] },
   { id: "captcha_failed", label: "验证码失败", events: ["captcha_failed"] },

@@ -135,6 +135,24 @@ func (rt *Runtime) forwardStream(
 	converted bool,
 	firstTokenTimeout time.Duration,
 ) streamAttemptResult {
+	return rt.forwardStreamWithToolBridge(ctx, c, target, path, method, inHeader, body, inboundKind, upstreamKind, model, converted, firstTokenTimeout, protocol.ResponsesToolBridge{})
+}
+
+func (rt *Runtime) forwardStreamWithToolBridge(
+	ctx context.Context,
+	c *gin.Context,
+	target *upstreamTarget,
+	path string,
+	method string,
+	inHeader http.Header,
+	body []byte,
+	inboundKind protocolKind,
+	upstreamKind protocolKind,
+	model string,
+	converted bool,
+	firstTokenTimeout time.Duration,
+	bridge protocol.ResponsesToolBridge,
+) streamAttemptResult {
 	clientCtx := context.Background()
 	if c != nil && c.Request != nil && c.Request.Context() != nil {
 		clientCtx = c.Request.Context()
@@ -189,9 +207,9 @@ func (rt *Runtime) forwardStream(
 
 	incremental := protocol.SupportsIncrementalStream(inboundKind, upstreamKind, converted)
 	if !incremental {
-		return rt.forwardStreamBuffered(c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status)
+		return rt.forwardStreamBufferedWithToolBridge(c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status, bridge)
 	}
-	return rt.forwardStreamIncremental(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status)
+	return rt.forwardStreamIncrementalWithToolBridge(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inboundKind, upstreamKind, model, converted, headers, status, bridge)
 }
 
 // forwardStreamBuffered 仅兜底：三协议互转已走增量真流；此处保留给未知协议或未实现转换器。
@@ -207,6 +225,21 @@ func (rt *Runtime) forwardStreamBuffered(
 	converted bool,
 	headers http.Header,
 	status int,
+) streamAttemptResult {
+	return rt.forwardStreamBufferedWithToolBridge(c, resp, start, firstTokenTimeout, inbound, upstream, model, converted, headers, status, protocol.ResponsesToolBridge{})
+}
+
+func (rt *Runtime) forwardStreamBufferedWithToolBridge(
+	c *gin.Context,
+	resp *http.Response,
+	start time.Time,
+	firstTokenTimeout time.Duration,
+	inbound, upstream protocolKind,
+	model string,
+	converted bool,
+	headers http.Header,
+	status int,
+	bridge protocol.ResponsesToolBridge,
 ) streamAttemptResult {
 	var ft *int64
 	// 从请求发起起算剩余首字预算（含已花费的等响应头时间）
@@ -238,7 +271,7 @@ func (rt *Runtime) forwardStreamBuffered(
 	data = append(data, rest...)
 
 	tokens := rt.parseUsageByKind(data, true, upstream)
-	clientBody := rt.convertUpstreamResponse(data, inbound, upstream, model, true, converted)
+	clientBody := rt.convertUpstreamResponseWithToolBridge(data, inbound, upstream, model, true, converted, bridge)
 	if len(clientBody) == 0 {
 		clientBody = data
 	}
@@ -282,6 +315,24 @@ func (rt *Runtime) forwardStreamIncremental(
 	headers http.Header,
 	status int,
 ) streamAttemptResult {
+	return rt.forwardStreamIncrementalWithToolBridge(upCtx, clientCtx, abortReq, c, resp, start, firstTokenTimeout, inbound, upstream, model, converted, headers, status, protocol.ResponsesToolBridge{})
+}
+
+func (rt *Runtime) forwardStreamIncrementalWithToolBridge(
+	upCtx context.Context,
+	clientCtx context.Context,
+	abortReq context.CancelFunc,
+	c *gin.Context,
+	resp *http.Response,
+	start time.Time,
+	firstTokenTimeout time.Duration,
+	inbound, upstream protocolKind,
+	model string,
+	converted bool,
+	headers http.Header,
+	status int,
+	bridge protocol.ResponsesToolBridge,
+) streamAttemptResult {
 	if upCtx == nil {
 		upCtx = context.Background()
 	}
@@ -291,6 +342,8 @@ func (rt *Runtime) forwardStreamIncremental(
 	result := streamAttemptResult{Status: status, Headers: headers}
 	clientKind := protocol.NormalizeKind(inbound)
 	upKind := protocol.NormalizeKind(upstream)
+	gwCfg := rt.gatewayRuntime()
+	maxLineSize := gwCfg.StreamMaxLineSize()
 
 	var (
 		anth2oai  *protocol.AnthropicToOpenAIStream
@@ -316,10 +369,10 @@ func (rt *Runtime) forwardStreamIncremental(
 			resp2oai = protocol.NewResponsesToOpenAIStream(model)
 		case clientKind == protocol.KindOpenAIResponses && upKind == protocol.KindAnthropic:
 			// Responses ← Anthropic
-			anth2resp = protocol.NewAnthropicToResponsesStream(model)
+			anth2resp = protocol.NewAnthropicToResponsesStreamWithToolBridge(model, bridge)
 		case clientKind == protocol.KindOpenAIResponses && (upKind == protocol.KindOpenAIChat || upKind == protocol.KindOpenAI):
 			// Responses ← Chat
-			chat2resp = protocol.NewChatToResponsesStream(model)
+			chat2resp = protocol.NewChatToResponsesStreamWithToolBridge(model, bridge)
 		}
 	}
 
@@ -335,7 +388,7 @@ func (rt *Runtime) forwardStreamIncremental(
 	go func() {
 		defer close(events)
 		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), maxSSELineSize)
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 		for scanner.Scan() {
 			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 			line := strings.TrimRight(scanner.Text(), "\r")
@@ -371,8 +424,8 @@ func (rt *Runtime) forwardStreamIncremental(
 		firstCh = firstTimer.C
 	}
 
-	keepalive := defaultStreamKeepalive
-	idleTimeout := defaultStreamIdleTimeout
+	keepalive := gwCfg.StreamKeepalive()
+	idleTimeout := gwCfg.StreamIdleTimeout()
 	var keepTicker *time.Ticker
 	if keepalive > 0 {
 		keepTicker = time.NewTicker(keepalive)
@@ -392,6 +445,7 @@ func (rt *Runtime) forwardStreamIncremental(
 		usageBuf         bytes.Buffer
 		tokens           UsageTokens
 	)
+	clientDone := clientCtx.Done()
 
 	stopFirstTimer := func() {
 		if firstTimer != nil {
@@ -492,7 +546,9 @@ func (rt *Runtime) forwardStreamIncremental(
 			return
 		}
 		errorEventSent = true
-		_ = rt.writeStreamTerminalError(c, clientKind, errType, msg)
+		if err := rt.writeStreamTerminalError(c, clientKind, errType, msg); err == nil {
+			result.DownstreamComplete = true
+		}
 	}
 
 	closeConverters := func() {
@@ -548,7 +604,7 @@ func (rt *Runtime) forwardStreamIncremental(
 			result.StreamErr = errors.New(msg)
 			return result
 
-		case <-clientCtx.Done():
+		case <-clientDone:
 			// 客户端断开 / 取消
 			if !result.Committed {
 				// 尚未向客户端提交：中止上游，允许上层记账为客户端取消（不 drain 计费，也无半截响应）
@@ -568,6 +624,7 @@ func (rt *Runtime) forwardStreamIncremental(
 			if !result.ClientDisconnected {
 				result.ClientDisconnected = true
 			}
+			clientDone = nil
 			continue
 
 		case <-firstCh:
@@ -614,15 +671,32 @@ func (rt *Runtime) forwardStreamIncremental(
 
 		case ev, ok := <-events:
 			if !ok {
-				// 上游结束
+				// 上游结束：没有协议终态时必须按失败处理，不能由转换器补一个成功帧。
 				if len(pendingLines) > 0 {
-					_ = processEvent(pendingLines)
+					if err := processEvent(pendingLines); err != nil && !result.ClientDisconnected {
+						result.StreamErr = err
+					}
 					pendingLines = pendingLines[:0]
+				}
+				result.Body = append([]byte(nil), usageBuf.Bytes()...)
+				result.Tokens = rt.finalizeStreamTokens(tokens, result.Body, upKind)
+				if !result.DownstreamComplete {
+					msg := "upstream stream closed before terminal event"
+					if !result.Committed {
+						result.Err = errors.New(msg)
+						return result
+					}
+					if !result.ClientDisconnected {
+						sendTerminalError("stream_incomplete", msg)
+					}
+					result.StreamErr = errors.New(msg)
+					rt.finalizeStreamClientDisconnect(&result)
+					return result
 				}
 				if !result.Committed {
 					// 空流
 					result.Body = usageBuf.Bytes()
-					result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
+					result.Tokens = rt.finalizeStreamTokens(tokens, result.Body, upKind)
 					// 仍写出转换收尾（可能只有 [DONE]）
 					closeConverters()
 					if !result.Committed {
@@ -638,7 +712,7 @@ func (rt *Runtime) forwardStreamIncremental(
 							}
 						}
 					}
-					result.Tokens = rt.finalizeStreamTokens(tokens, usageBuf.Bytes(), upKind)
+					result.Tokens = rt.finalizeStreamTokens(tokens, result.Body, upKind)
 					rt.finalizeStreamClientDisconnect(&result)
 					return result
 				}
@@ -651,7 +725,7 @@ func (rt *Runtime) forwardStreamIncremental(
 			if ev.err != nil {
 				if !result.Committed {
 					if errors.Is(ev.err, bufio.ErrTooLong) {
-						result.Err = fmt.Errorf("upstream SSE line exceeded %d bytes", maxSSELineSize)
+						result.Err = fmt.Errorf("upstream SSE line exceeded %d bytes", maxLineSize)
 					} else {
 						result.Err = ev.err
 					}
@@ -665,7 +739,7 @@ func (rt *Runtime) forwardStreamIncremental(
 				}
 				msg := "upstream stream disconnected"
 				if errors.Is(ev.err, bufio.ErrTooLong) {
-					msg = fmt.Sprintf("upstream SSE line exceeded %d bytes", maxSSELineSize)
+					msg = fmt.Sprintf("upstream SSE line exceeded %d bytes", maxLineSize)
 				}
 				sendTerminalError("stream_read_error", msg)
 				result.StreamErr = ev.err
@@ -689,10 +763,29 @@ func (rt *Runtime) forwardStreamIncremental(
 						result.FirstTokenMS = &ms
 					}
 				}
+				eventName, eventData := rt.parseSSEEventLines(pendingLines)
+				terminal, success, terminalMessage := rt.upstreamSSETerminal(eventName, eventData, upKind)
 				if err := processEvent(pendingLines); err != nil && !result.ClientDisconnected {
 					// write error already flagged disconnect
 				}
 				pendingLines = pendingLines[:0]
+				if terminal {
+					result.Body = append([]byte(nil), usageBuf.Bytes()...)
+					result.Tokens = rt.finalizeStreamTokens(tokens, result.Body, upKind)
+					if success {
+						closeConverters()
+					} else {
+						if terminalMessage == "" {
+							terminalMessage = "upstream response failed"
+						}
+						if !result.ClientDisconnected && !result.DownstreamComplete {
+							sendTerminalError("upstream_error", terminalMessage)
+						}
+						result.StreamErr = errors.New(terminalMessage)
+					}
+					rt.finalizeStreamClientDisconnect(&result)
+					return result
+				}
 				continue
 			}
 			pendingLines = append(pendingLines, line)

@@ -79,7 +79,7 @@ func (a *AdminService) reorderRoutesPersisted(groupID uint) error {
 }
 
 // ResortRoutesOnRateScan 倍率扫描结束后调用：对开启「渠道分组价格倍率重排」的组
-// 按实时源分组倍率重写路由顺序与账号计费倍率（对齐上游同步账号 SyncAllOnRateScan）。
+// 按实时源分组倍率重写路由顺序与账号计费倍率。
 
 func (a *AdminService) ResortRoutesOnRateScan(ctx context.Context) {
 	if a == nil || a.Service == nil || a.Groups == nil || a.Routes == nil {

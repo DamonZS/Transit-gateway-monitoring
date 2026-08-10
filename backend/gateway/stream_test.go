@@ -172,6 +172,30 @@ func TestForwardStream_UpstreamErrorNotCommitted(t *testing.T) {
 	}
 }
 
+func TestForwardStream_ResponsesEOFWithoutTerminalFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+	}))
+	defer upstream.Close()
+
+	svc := &Service{}
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	res := svc.forwardStream(
+		c.Request.Context(), c, &upstreamTarget{BaseURL: upstream.URL, APIKey: "k"}, "/v1/responses", http.MethodPost,
+		nil, []byte(`{"model":"m","stream":true}`), protocol.KindOpenAIResponses, protocol.KindOpenAIResponses, "m", false, 0,
+	)
+	if !res.Committed || res.StreamErr == nil {
+		t.Fatalf("result=%+v", res)
+	}
+	if !strings.Contains(rec.Body.String(), "event: response.failed") {
+		t.Fatalf("missing Responses failure terminal: %s", rec.Body.String())
+	}
+}
+
 func TestForwardStream_ClientDisconnectDrainsUsage(t *testing.T) {
 	// 对齐 sub2api：客户端中途断开后，上游请求不取消，继续读到 usage 帧。
 	// 注意：中途断开时故意不让 [DONE] 先写出到客户端（断开发生在 content 之后、DONE 之前），

@@ -32,7 +32,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { CaptchaFormDialog } from "@/components/monitor/captcha-form-dialog";
 import { NotificationFormDialog } from "@/components/monitor/notification-form-dialog";
-import { UpstreamSyncSettings } from "@/components/settings/upstream-sync-settings";
 import { apiFetch } from "@/lib/api";
 import { useTriggerRefresh } from "@/lib/refresh-context";
 import type {
@@ -68,6 +67,9 @@ const defaultGatewayConfig: SystemGatewayConfig = {
   usageErrorMsgRunes: 500,
   usageErrorHeaderValueRunes: 8192,
   usageErrorHeadersJSONBytes: 65536,
+  streamKeepaliveSeconds: 15,
+  streamIdleTimeoutSeconds: 120,
+  streamMaxLineBytes: 8 * 1024 * 1024,
 };
 
 function patchGateway(
@@ -345,10 +347,6 @@ export default function SettingsPage() {
           </TabsTrigger>
           <TabsTrigger value="captcha" className="px-4 py-2">
             验证码服务
-          </TabsTrigger>
-          <TabsTrigger value="upstream-sync" className="px-4 py-2">
-            <Workflow className="size-3.5" />
-            上游动态同步
           </TabsTrigger>
         </TabsList>
 
@@ -727,28 +725,9 @@ export default function SettingsPage() {
           <SectionCard
             icon={<Bell className="size-4 text-amber-600" />}
             title="通知策略"
-            description="这些项决定系统怎么合并、过滤和重试通知。"
+            description="这些项决定系统如何过滤和重试通知。"
           >
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <InlineSwitch
-                id="batch-rate"
-                label="合并倍率变化"
-                description="同一次扫描中的多条倍率变化合并发送。"
-                checked={form.notifications.batchRateChanges}
-                onCheckedChange={(checked) =>
-                  setForm((prev) =>
-                    prev
-                      ? {
-                          ...prev,
-                          notifications: {
-                            ...prev.notifications,
-                            batchRateChanges: checked,
-                          },
-                        }
-                      : prev,
-                  )
-                }
-              />
               <Field
                 label="最小涨跌幅百分比"
                 description="低于该值的倍率变化不发送通知。"
@@ -997,6 +976,51 @@ export default function SettingsPage() {
                   onChange={(e) =>
                     setForm((prev) =>
                       patchGateway(prev, "forwardTimeoutSeconds", num(e.target.value)),
+                    )
+                  }
+                />
+              </Field>
+              <Field
+                label="流保活间隔（秒）"
+                description={`已提交 SSE 流的下游保活间隔，默认 ${defaultGatewayConfig.streamKeepaliveSeconds}。`}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  value={String(form.gateway?.streamKeepaliveSeconds ?? defaultGatewayConfig.streamKeepaliveSeconds)}
+                  onChange={(e) =>
+                    setForm((prev) =>
+                      patchGateway(prev, "streamKeepaliveSeconds", num(e.target.value)),
+                    )
+                  }
+                />
+              </Field>
+              <Field
+                label="流空闲超时（秒）"
+                description={`上游 SSE 在收到数据后允许的最长空闲时间，默认 ${defaultGatewayConfig.streamIdleTimeoutSeconds}。`}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  value={String(form.gateway?.streamIdleTimeoutSeconds ?? defaultGatewayConfig.streamIdleTimeoutSeconds)}
+                  onChange={(e) =>
+                    setForm((prev) =>
+                      patchGateway(prev, "streamIdleTimeoutSeconds", num(e.target.value)),
+                    )
+                  }
+                />
+              </Field>
+              <Field
+                label="SSE 单行上限（字节）"
+                description={`上游单条 SSE 行最大长度，默认 ${defaultGatewayConfig.streamMaxLineBytes}。`}
+              >
+                <Input
+                  type="number"
+                  min={65536}
+                  value={String(form.gateway?.streamMaxLineBytes ?? defaultGatewayConfig.streamMaxLineBytes)}
+                  onChange={(e) =>
+                    setForm((prev) =>
+                      patchGateway(prev, "streamMaxLineBytes", num(e.target.value)),
                     )
                   }
                 />
@@ -1589,9 +1613,6 @@ export default function SettingsPage() {
           </SectionCard>
         </TabsContent>
 
-        <TabsContent value="upstream-sync">
-          <UpstreamSyncSettings />
-        </TabsContent>
       </Tabs>
 
       <NotificationFormDialog

@@ -107,141 +107,6 @@ func TestChannelProxyEnabledPersists(t *testing.T) {
 	}
 }
 
-func TestUpstreamSyncAccountUpdateKeepsCreatedAt(t *testing.T) {
-	db := openTestDB(t)
-	accounts := NewUpstreamSyncAccounts(db)
-	sourceGroupID := int64(21)
-	if err := accounts.SaveForGroup(2, []UpstreamSyncAccount{{
-		SourceChannelID:  3,
-		SourceGroupID:    &sourceGroupID,
-		Concurrency:      10,
-		Weight:           1,
-		RateConvertMode:  "raw",
-		RateConvertValue: 1,
-		Enabled:          true,
-	}}); err != nil {
-		t.Fatalf("create sync account: %v", err)
-	}
-	created, err := accounts.ListBySyncGroupID(2)
-	if err != nil {
-		t.Fatalf("list sync accounts: %v", err)
-	}
-	if len(created) != 1 || created[0].CreatedAt.IsZero() {
-		t.Fatalf("created account = %#v", created)
-	}
-
-	account := UpstreamSyncAccount{
-		ID:               created[0].ID,
-		SourceChannelID:  3,
-		SourceGroupID:    &sourceGroupID,
-		Concurrency:      20,
-		Weight:           2,
-		RateConvertMode:  "raw",
-		RateConvertValue: 1,
-		Enabled:          true,
-		TestEnabled:      true,
-		TestModel:        "gpt-b",
-	}
-	if err := accounts.SaveForGroup(2, []UpstreamSyncAccount{account}); err != nil {
-		t.Fatalf("update sync account: %v", err)
-	}
-	updated, err := accounts.ListBySyncGroupID(2)
-	if err != nil {
-		t.Fatalf("list updated sync accounts: %v", err)
-	}
-	if len(updated) != 1 || !updated[0].CreatedAt.Equal(created[0].CreatedAt) {
-		t.Fatalf("created_at changed: before=%s after=%s", created[0].CreatedAt, updated[0].CreatedAt)
-	}
-	if !updated[0].TestEnabled {
-		t.Fatalf("test_enabled = false, want true")
-	}
-	if updated[0].TestModel != "gpt-b" {
-		t.Fatalf("test_model = %q, want gpt-b", updated[0].TestModel)
-	}
-}
-
-func TestUpstreamSyncTargetGroupUpsertKeepsCreatedAt(t *testing.T) {
-	db := openTestDB(t)
-	groups := NewUpstreamSyncTargetGroups(db)
-	lastSync := time.Now()
-	if err := groups.Upsert(&UpstreamSyncTargetGroup{
-		TargetID:      1,
-		RemoteGroupID: 101,
-		Name:          "old",
-		Platform:      "openai",
-		Ratio:         0.06,
-		Status:        "active",
-		LastSyncAt:    &lastSync,
-	}); err != nil {
-		t.Fatalf("create target group: %v", err)
-	}
-	created, err := groups.FindByTargetAndRemote(1, 101)
-	if err != nil {
-		t.Fatalf("find target group: %v", err)
-	}
-
-	if err := groups.Upsert(&UpstreamSyncTargetGroup{
-		TargetID:      1,
-		RemoteGroupID: 101,
-		Name:          "new",
-		Platform:      "openai",
-		Ratio:         0.065,
-		Status:        "active",
-		LastSyncAt:    &lastSync,
-	}); err != nil {
-		t.Fatalf("update target group: %v", err)
-	}
-	updated, err := groups.FindByTargetAndRemote(1, 101)
-	if err != nil {
-		t.Fatalf("find updated target group: %v", err)
-	}
-	if !updated.CreatedAt.Equal(created.CreatedAt) || updated.Name != "new" || updated.Ratio != 0.065 {
-		t.Fatalf("updated target group = %#v, created_at before=%s", updated, created.CreatedAt)
-	}
-}
-
-func TestUpstreamSyncManagedAccountUpsertKeepsCreatedAt(t *testing.T) {
-	db := openTestDB(t)
-	managed := NewUpstreamSyncManagedAccounts(db)
-	appliedAt := time.Now()
-	if err := managed.Upsert(&UpstreamSyncManagedAccount{
-		SyncGroupID:        1,
-		SyncAccountID:      2,
-		SourceAPIKeyID:     10,
-		SourceAPIKeyName:   "key",
-		TargetAccountID:    20,
-		TargetAccountName:  "old",
-		TargetGroupIDsJSON: "[1]",
-		LastAppliedAt:      &appliedAt,
-	}); err != nil {
-		t.Fatalf("create managed account: %v", err)
-	}
-	created, err := managed.FindByAccountID(2)
-	if err != nil {
-		t.Fatalf("find managed account: %v", err)
-	}
-
-	if err := managed.Upsert(&UpstreamSyncManagedAccount{
-		SyncGroupID:        1,
-		SyncAccountID:      2,
-		SourceAPIKeyID:     0,
-		SourceAPIKeyName:   "",
-		TargetAccountID:    21,
-		TargetAccountName:  "new",
-		TargetGroupIDsJSON: "[2]",
-		LastAppliedAt:      &appliedAt,
-	}); err != nil {
-		t.Fatalf("update managed account: %v", err)
-	}
-	updated, err := managed.FindByAccountID(2)
-	if err != nil {
-		t.Fatalf("find updated managed account: %v", err)
-	}
-	if !updated.CreatedAt.Equal(created.CreatedAt) || updated.SourceAPIKeyID != 0 || updated.TargetAccountName != "new" {
-		t.Fatalf("updated managed account = %#v, created_at before=%s", updated, created.CreatedAt)
-	}
-}
-
 func TestProxyEnabledPersistsForCaptchaAndNotification(t *testing.T) {
 	db := openTestDB(t)
 
@@ -1003,6 +868,28 @@ func TestAutoMigrateDropsDeletedAtColumns(t *testing.T) {
 	}
 }
 
+func TestAutoMigrateDropsObsoleteRateSiteColumns(t *testing.T) {
+	db := openTestDB(t)
+	if err := db.Exec("ALTER TABLE rate_snapshots ADD COLUMN site_id integer NOT NULL DEFAULT 1").Error; err != nil {
+		t.Fatalf("add rate_snapshots.site_id: %v", err)
+	}
+	if err := db.Exec("ALTER TABLE rate_change_logs ADD COLUMN site_id integer NOT NULL DEFAULT 1").Error; err != nil {
+		t.Fatalf("add rate_change_logs.site_id: %v", err)
+	}
+	if err := AutoMigrate(db); err != nil {
+		t.Fatalf("auto migrate: %v", err)
+	}
+	for _, table := range []string{"rate_snapshots", "rate_change_logs"} {
+		hasColumn, err := tableHasColumn(db, table, "site_id")
+		if err != nil {
+			t.Fatalf("inspect %s.site_id: %v", table, err)
+		}
+		if hasColumn {
+			t.Fatalf("%s.site_id still exists", table)
+		}
+	}
+}
+
 func TestGatewayGroupsReorderAndListOrder(t *testing.T) {
 	db := openTestDB(t)
 	repo := NewGatewayGroups(db)
@@ -1193,7 +1080,6 @@ func TestNoteSuccessForPauseErrorClearsAfterStreak(t *testing.T) {
 		t.Fatalf("streak should stay 0, got %d", got.RecoverSuccessStreak)
 	}
 }
-
 
 func TestGatewayUsageListModels(t *testing.T) {
 	db := openTestDB(t)

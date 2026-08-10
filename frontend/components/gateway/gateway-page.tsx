@@ -9,6 +9,8 @@ import {
   Route,
   ScrollText,
   KeyRound,
+  MessageSquareText,
+  SlidersHorizontal,
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -29,6 +31,8 @@ import type {
   GatewayModelTestResult,
   GatewayProviderOption,
   GatewayRoute,
+  GatewayServiceTierRule,
+  GatewaySystemPromptRule,
   GatewayUsageModelOption,
   GatewayUsagePage,
   GatewayUsageStats,
@@ -48,6 +52,8 @@ import { RoutesPanel } from "./routes-panel"
 import { ModelsPanel } from "./models-panel"
 import { UsagePanel } from "./usage-panel"
 import { PricesPanel } from "./prices-panel"
+import { PromptInjectionPanel } from "./prompt-injection-panel"
+import { ServiceTierPolicyPanel } from "./service-tier-policy-panel"
 import {
   CreatedSecretDialog,
   DefaultsPriceDialog,
@@ -65,9 +71,13 @@ import {
   ipListToText,
   mTokToPerToken,
   parseModelsJSON,
+  parsePriceTiers,
+  parseServiceTierRules,
+  parseSystemPromptRules,
   perTokenToMTok,
   routeAccountRate,
   routeSourceKind,
+  serializePriceTiers,
   sortGatewayRouteRows,
   testBusyKey,
   textToIPListJSON,
@@ -118,6 +128,10 @@ export function GatewayPage() {
   const [modelItems, setModelItems] = useState<GatewayModelListItem[]>([])
   const [customModel, setCustomModel] = useState("")
   const [rateSort, setRateSort] = useState<string>("asc")
+  const [serviceTierRules, setServiceTierRules] = useState<GatewayServiceTierRule[]>(
+    () => parseServiceTierRules(),
+  )
+  const [systemPromptRules, setSystemPromptRules] = useState<GatewaySystemPromptRule[]>([])
 
   const [usage, setUsage] = useState<GatewayUsagePage | null>(null)
   const [usageStats, setUsageStats] = useState<GatewayUsageStats | null>(null)
@@ -142,6 +156,8 @@ export function GatewayPage() {
   const usageSeqRef = useRef(0)
 
   const [prices, setPrices] = useState<ModelPriceOverride[]>([])
+  const [priceDialogOpen, setPriceDialogOpen] = useState(false)
+  const [editingPrice, setEditingPrice] = useState<ModelPriceOverride | null>(null)
   const [priceForm, setPriceForm] = useState<PriceFormState>(emptyPriceForm)
   const [defaultsOpen, setDefaultsOpen] = useState(false)
   const [defaultsQuery, setDefaultsQuery] = useState("")
@@ -292,6 +308,8 @@ export function GatewayPage() {
     setModelsMode(g.models_mode || "auto")
     setMappingRows(parseMappingJSON(g.model_mapping))
     setModelItems(parseModelsJSON(g.models_json))
+    setServiceTierRules(parseServiceTierRules(g.service_tier_rules_json))
+    setSystemPromptRules(parseSystemPromptRules(g.system_prompt_rules_json))
   }, [])
 
   /**
@@ -625,6 +643,7 @@ export function GatewayPage() {
         setRouteDrafts([])
         setMappingRows([])
         setModelItems([])
+        setSystemPromptRules([])
       }
 
       const opts = usageQueryOpts(usagePage, usagePageSize)
@@ -678,6 +697,8 @@ export function GatewayPage() {
       setRouteDrafts([])
       setMappingRows([])
       setModelItems([])
+      setServiceTierRules(parseServiceTierRules())
+      setSystemPromptRules([])
       return
     }
     void reloadGroupDetail(selectedGroup)
@@ -820,6 +841,7 @@ export function GatewayPage() {
           model_mapping: serializeMappingJSON(mappingRows),
           models_mode: modelsMode,
           models_json: JSON.stringify(modelItems),
+          service_tier_rules_json: JSON.stringify(serviceTierRules),
         }),
       })
       // 后端在排序方向变更时会重排路由 position；前端同步草稿
@@ -827,8 +849,40 @@ export function GatewayPage() {
         `/gateway/groups/${selectedGroup.id}/routes`,
       )
       setRouteDrafts((res.items ?? []).map((r) => ({ ...r })))
-      toast.success("组配置已保存，路由已按倍率重排")
+      toast.success("网关组配置已保存")
       await loadGroups()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function savePromptInjection() {
+    if (!selectedGroup) return
+    if (systemPromptRules.some(
+      (rule) => rule.key_scope === "selected" &&
+        rule.key_ids.some((keyID) => !keys.some((key) => key.id === keyID)),
+    )) {
+      toast.error("所选 Key 必须属于当前组")
+      return
+    }
+    setBusy(true)
+    try {
+      const updated = await apiFetch<GatewayGroup>(
+        `/gateway/groups/${selectedGroup.id}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            system_prompt_rules_json: JSON.stringify(systemPromptRules),
+          }),
+        },
+      )
+      setGroups((items) =>
+        items.map((group) => (group.id === updated.id ? updated : group)),
+      )
+      setSystemPromptRules(parseSystemPromptRules(updated.system_prompt_rules_json))
+      toast.success("提示词注入配置已保存")
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存失败")
     } finally {
@@ -1013,7 +1067,7 @@ export function GatewayPage() {
             (r.rate_convert_mode as string) === "custom"
               ? (r.rate_convert_value ?? 0)
               : 1,
-          // 与上游同步一致：持久化换算后的账号计费倍率（原值=源 ratio）
+          // 与网关路由计费一致：持久化换算后的账号计费倍率（原值=源 ratio）
           billing_rate_multiplier: accountRate > 0 ? accountRate : 1,
           enabled: r.enabled !== false,
           model_mapping: r.model_mapping ?? "",
@@ -1110,8 +1164,11 @@ export function GatewayPage() {
   }
 
   function applyDefaultAsOverride(p: ModelDefaultPrice) {
+    setEditingPrice(null)
     setPriceForm({
+      ...emptyPriceForm(),
       model_name: p.model_name,
+      billing_mode: "token",
       input_mtok: perTokenToMTok(p.input_price_per_token),
       output_mtok: perTokenToMTok(p.output_price_per_token),
       cache_create_mtok: perTokenToMTok(p.cache_creation_price_per_token),
@@ -1119,18 +1176,35 @@ export function GatewayPage() {
       enabled: true,
     })
     setDefaultsOpen(false)
-    toast.message("已填入表单，确认后点击保存")
+    setPriceDialogOpen(true)
   }
 
-  function fillPriceFormFromOverride(p: ModelPriceOverride) {
+  function openCreatePrice() {
+    setEditingPrice(null)
+    setPriceForm(emptyPriceForm())
+    setPriceDialogOpen(true)
+  }
+
+  function openEditPrice(p: ModelPriceOverride) {
+    setEditingPrice(p)
     setPriceForm({
       model_name: p.model_name,
+      billing_mode: p.billing_mode || "token",
       input_mtok: perTokenToMTok(p.input_price_per_token),
       output_mtok: perTokenToMTok(p.output_price_per_token),
       cache_create_mtok: perTokenToMTok(p.cache_creation_price_per_token),
       cache_read_mtok: perTokenToMTok(p.cache_read_price_per_token),
+      per_request_price: String(p.per_request_price ?? 0),
+      pricing_tiers: parsePriceTiers(p.pricing_tiers_json),
+      image_price_1k: String(p.image_price_1k ?? 0),
+      image_price_2k: String(p.image_price_2k ?? 0),
+      image_price_4k: String(p.image_price_4k ?? 0),
+      video_price_480p: String(p.video_price_480p ?? 0),
+      video_price_720p: String(p.video_price_720p ?? 0),
+      video_price_1080p: String(p.video_price_1080p ?? 0),
       enabled: p.enabled !== false,
     })
+    setPriceDialogOpen(true)
   }
 
   async function syncModels() {
@@ -1294,18 +1368,49 @@ export function GatewayPage() {
         method: "PUT",
         body: JSON.stringify({
           model_name: model,
+          billing_mode: priceForm.billing_mode,
           input_price_per_token: mTokToPerToken(priceForm.input_mtok),
           output_price_per_token: mTokToPerToken(priceForm.output_mtok),
           cache_creation_price_per_token: mTokToPerToken(priceForm.cache_create_mtok),
           cache_read_price_per_token: mTokToPerToken(priceForm.cache_read_mtok),
+          per_request_price: Number(priceForm.per_request_price) || 0,
+          pricing_tiers_json: serializePriceTiers(priceForm.pricing_tiers),
+          image_price_1k: Number(priceForm.image_price_1k) || 0,
+          image_price_2k: Number(priceForm.image_price_2k) || 0,
+          image_price_4k: Number(priceForm.image_price_4k) || 0,
+          video_price_480p: Number(priceForm.video_price_480p) || 0,
+          video_price_720p: Number(priceForm.video_price_720p) || 0,
+          video_price_1080p: Number(priceForm.video_price_1080p) || 0,
           enabled: priceForm.enabled,
         }),
       })
-      toast.success("价格已保存")
+      toast.success(editingPrice ? "价格覆盖已更新" : "价格覆盖已创建")
       setPriceForm(emptyPriceForm())
+      setEditingPrice(null)
+      setPriceDialogOpen(false)
       await loadPrices()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "保存失败")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function deletePrice(p: ModelPriceOverride) {
+    const ok = await confirm({
+      title: "删除价格覆盖",
+      description: `确定删除「${p.model_name}」的价格覆盖？删除后将使用系统默认价。`,
+      confirmLabel: "删除",
+      destructive: true,
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await apiFetch(`/gateway/prices/${p.id}`, { method: "DELETE" })
+      toast.success("已删除价格覆盖")
+      await loadPrices()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "删除失败")
     } finally {
       setBusy(false)
     }
@@ -1394,7 +1499,7 @@ export function GatewayPage() {
 
         {/* ── 网关：左组列表 + 右配置 ── */}
         <TabsContent value="gateway" className="mt-0">
-          <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
+          <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
             <GroupsSidebar
               groups={groups}
               selectedGroupID={selectedGroupID}
@@ -1472,7 +1577,7 @@ export function GatewayPage() {
                         : "translate-y-0 animate-in fade-in-0 duration-200",
                     )}
                   >
-                    <TabsList className="h-auto w-fit justify-start rounded-xl border border-border bg-muted/30 p-1">
+                    <TabsList className="h-auto w-full justify-start rounded-lg border border-border bg-muted/30 p-1">
                       <TabsTrigger value="keys" className="flex-none gap-1.5 px-3 py-1.5">
                         <KeyRound className="size-3.5" /> 密钥
                       </TabsTrigger>
@@ -1481,6 +1586,12 @@ export function GatewayPage() {
                       </TabsTrigger>
                       <TabsTrigger value="models" className="flex-none gap-1.5 px-3 py-1.5">
                         <Layers className="size-3.5" /> 模型映射
+                      </TabsTrigger>
+                      <TabsTrigger value="service-tier" className="flex-none gap-1.5 px-3 py-1.5">
+                        <SlidersHorizontal className="size-3.5" /> 请求策略
+                      </TabsTrigger>
+                      <TabsTrigger value="prompt" className="flex-none gap-1.5 px-3 py-1.5">
+                        <MessageSquareText className="size-3.5" /> 提示词注入
                       </TabsTrigger>
                     </TabsList>
 
@@ -1544,6 +1655,26 @@ export function GatewayPage() {
                         modelSuggestions={modelSuggestions}
                       />
                     </TabsContent>
+
+                    <TabsContent value="service-tier" className="mt-0 space-y-4">
+                      <ServiceTierPolicyPanel
+                        rules={serviceTierRules}
+                        keys={keys}
+                        busy={busy || groupLoading}
+                        onChange={setServiceTierRules}
+                        onSave={() => void saveGroupConfig()}
+                      />
+                    </TabsContent>
+
+                    <TabsContent value="prompt" className="mt-0 space-y-4">
+                      <PromptInjectionPanel
+                        rules={systemPromptRules}
+                        keys={keys}
+                        busy={busy || groupLoading}
+                        onChange={setSystemPromptRules}
+                        onSave={() => void savePromptInjection()}
+                      />
+                    </TabsContent>
                   </Tabs>
                 </div>
               )}
@@ -1592,12 +1723,16 @@ export function GatewayPage() {
           <PricesPanel
             busy={busy}
             prices={prices}
+            priceDialogOpen={priceDialogOpen}
+            editingPrice={editingPrice}
             priceForm={priceForm}
             setPriceForm={setPriceForm}
+            onPriceDialogOpenChange={setPriceDialogOpen}
+            onCreatePrice={openCreatePrice}
             onSavePrice={() => void savePrice()}
             onOpenDefaults={() => void openDefaultsModal()}
-            onFillFromOverride={fillPriceFormFromOverride}
-            onLoadPrices={() => void loadPrices()}
+            onEditPrice={openEditPrice}
+            onDeletePrice={(p) => void deletePrice(p)}
           />
         </TabsContent>
       </Tabs>

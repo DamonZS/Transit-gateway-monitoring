@@ -10,13 +10,11 @@ import (
 )
 
 // Policy 通知去抖策略。所有字段都是面向"少烦用户"取向：
-//   - BatchRateChanges：同次扫描中合并多条倍率相关通知
 //   - MinChangePct：涨跌幅小于阈值时跳过推送（仍写入 RateChangeLog 表）
 //   - BalanceLowCooldown：同渠道 balance_low 在窗口内不重复发送
 //   - SendMaxAttempts：单条消息最多发送尝试次数（含首发），<=1 表示不重试
 type Policy struct {
 	NotificationPrefix                       string
-	BatchRateChanges                         bool
 	MinChangePct                             float64
 	BalanceLowCooldown                       time.Duration
 	SubscriptionDailyRemainingThresholdPct   float64
@@ -46,9 +44,22 @@ type RateChange struct {
 	ChangedAt time.Time
 }
 
-type RateStructureChange struct {
-	Added   []RateChange
-	Removed []RateChange
+// ChannelRateChange 为全渠道扫描保留来源渠道，供订阅规则筛选和汇总展示。
+type ChannelRateChange struct {
+	ChannelID   uint
+	ChannelName string
+	Change      RateChange
+}
+
+// RateNotificationBatch 是一次全渠道扫描中的全部分组变化。
+type RateNotificationBatch struct {
+	Changed []ChannelRateChange
+	Added   []ChannelRateChange
+	Removed []ChannelRateChange
+}
+
+func (b RateNotificationBatch) Empty() bool {
+	return len(b.Changed)+len(b.Added)+len(b.Removed) == 0
 }
 
 // ChangePctAbove 涨跌幅是否达到阈值。
@@ -64,132 +75,48 @@ func (rc RateChange) ChangePctAbove(minPct float64) bool {
 	return pct >= minPct
 }
 
-// BuildBatchMessage 把多条 RateChange 合并成一条 notify.Message。
-// 当只有 1 条时仍走这个路径，但 Subject / Body 自然退化成单条提醒。
-func BuildBatchMessage(channel *storage.Channel, changes []RateChange) Message {
-	return BuildRateBatchMessage(channel, storage.EventRateChanged, changes)
-}
-
-func BuildRateBatchMessage(channel *storage.Channel, event storage.NotificationEvent, changes []RateChange) Message {
-	if len(changes) == 0 {
+// BuildRateNotificationBatchMessage 把整轮扫描的渠道变化合并为一条 CommonMark 消息。
+func BuildRateNotificationBatchMessage(batch RateNotificationBatch) Message {
+	if batch.Empty() {
 		return Message{}
 	}
-	now := time.Now()
-	if len(changes) == 1 {
-		c := changes[0]
-		if event == storage.EventRateAdded {
-			return Message{
-				Event:     storage.EventRateAdded,
-				ChannelID: channel.ID,
-				ModelName: c.GroupName,
-				Subject:   fmt.Sprintf("【分组新增提醒】%s · %s", channel.Name, c.GroupName),
-				Body: fmt.Sprintf(
-					"渠道：%s\n新增分组：%s\n倍率：%g\n发现时间：%s",
-					channel.Name, c.GroupName, c.NewRatio, now.Format("2006-01-02 15:04"),
-				),
-			}
-		}
-		if event == storage.EventRateRemoved {
-			return Message{
-				Event:     storage.EventRateRemoved,
-				ChannelID: channel.ID,
-				ModelName: c.GroupName,
-				Subject:   fmt.Sprintf("【分组删除提醒】%s · %s", channel.Name, c.GroupName),
-				Body: fmt.Sprintf(
-					"渠道：%s\n删除分组：%s\n原倍率：%g\n发现时间：%s",
-					channel.Name, c.GroupName, c.OldRatio, now.Format("2006-01-02 15:04"),
-				),
-			}
-		}
-		return Message{
-			Event:     storage.EventRateChanged,
-			ChannelID: channel.ID,
-			ModelName: c.GroupName,
-			Subject:   fmt.Sprintf("【倍率变化提醒】%s · %s", channel.Name, c.GroupName),
-			Body: fmt.Sprintf(
-				"渠道：%s\n分组倍率：%s 由 %g %s至 %g\n变化时间：%s",
-				channel.Name, c.GroupName, c.OldRatio, arrowFor(c.OldRatio, c.NewRatio), c.NewRatio,
-				now.Format("2006-01-02 15:04"),
-			),
-		}
-	}
-
-	// 合并多条：subject 简短，body 列出每条。
 	var b strings.Builder
-	switch event {
-	case storage.EventRateAdded:
-		fmt.Fprintf(&b, "渠道：%s\n共 %d 个新增分组：\n", channel.Name, len(changes))
-		for _, c := range changes {
-			fmt.Fprintf(&b, "  · %s：倍率 %g\n", c.GroupName, c.NewRatio)
+	fmt.Fprintf(&b, "# 渠道分组变动\n\n> 扫描时间：%s\n", time.Now().Format("2006-01-02 15:04"))
+	writeRateNotificationSection(&b, "倍率变化", batch.Changed, func(c RateChange) string {
+		return fmt.Sprintf("倍率：`%gx` %s `%gx`", c.OldRatio, arrowFor(c.OldRatio, c.NewRatio), c.NewRatio)
+	})
+	writeRateNotificationSection(&b, "新增分组", batch.Added, func(c RateChange) string {
+		return fmt.Sprintf("倍率：`%gx`", c.NewRatio)
+	})
+	writeRateNotificationSection(&b, "移除分组", batch.Removed, func(c RateChange) string {
+		return fmt.Sprintf("原倍率：`%gx`", c.OldRatio)
+	})
+	channels := make(map[uint]struct{})
+	for _, items := range [][]ChannelRateChange{batch.Changed, batch.Added, batch.Removed} {
+		for _, item := range items {
+			channels[item.ChannelID] = struct{}{}
 		}
-		fmt.Fprintf(&b, "时间：%s", now.Format("2006-01-02 15:04"))
-		return Message{
-			Event:     storage.EventRateAdded,
-			ChannelID: channel.ID,
-			ModelName: "",
-			Subject:   fmt.Sprintf("【分组新增提醒】%s · %d 个分组", channel.Name, len(changes)),
-			Body:      b.String(),
-		}
-	case storage.EventRateRemoved:
-		fmt.Fprintf(&b, "渠道：%s\n共 %d 个删除分组：\n", channel.Name, len(changes))
-		for _, c := range changes {
-			fmt.Fprintf(&b, "  · %s：原倍率 %g\n", c.GroupName, c.OldRatio)
-		}
-		fmt.Fprintf(&b, "时间：%s", now.Format("2006-01-02 15:04"))
-		return Message{
-			Event:     storage.EventRateRemoved,
-			ChannelID: channel.ID,
-			ModelName: "",
-			Subject:   fmt.Sprintf("【分组删除提醒】%s · %d 个分组", channel.Name, len(changes)),
-			Body:      b.String(),
-		}
-	default:
-		fmt.Fprintf(&b, "渠道：%s\n共 %d 个分组倍率变化：\n", channel.Name, len(changes))
-		for _, c := range changes {
-			fmt.Fprintf(&b, "  · %s：%g %s至 %g\n",
-				c.GroupName, c.OldRatio, arrowFor(c.OldRatio, c.NewRatio), c.NewRatio)
-		}
-		fmt.Fprintf(&b, "时间：%s", now.Format("2006-01-02 15:04"))
 	}
-
-	// ModelName 在合并消息里没有单一值；填空，订阅过滤改在 Dispatcher 里按"先按订阅切片再合并"处理。
+	total := len(batch.Changed) + len(batch.Added) + len(batch.Removed)
 	return Message{
-		Event:     storage.EventRateChanged,
-		ChannelID: channel.ID,
-		ModelName: "",
-		Subject:   fmt.Sprintf("【倍率变化提醒】%s · %d 个分组变动", channel.Name, len(changes)),
-		Body:      b.String(),
+		Event:   storage.EventRateChanged,
+		Subject: fmt.Sprintf("【渠道分组变动】%d 个渠道 · %d 项", len(channels), total),
+		Body:    b.String(),
 	}
 }
 
-func BuildRateStructureMessage(channel *storage.Channel, change RateStructureChange) Message {
-	total := len(change.Added) + len(change.Removed)
-	if channel == nil || total == 0 {
-		return Message{}
+func writeRateNotificationSection(b *strings.Builder, title string, items []ChannelRateChange, detail func(RateChange) string) {
+	if len(items) == 0 {
+		return
 	}
-	now := time.Now()
-	var b strings.Builder
-	fmt.Fprintf(&b, "渠道：%s\n共 %d 个分组变动", channel.Name, total)
-	if len(change.Added) > 0 {
-		fmt.Fprintf(&b, "\n\n新增 %d 个分组：\n", len(change.Added))
-		for _, c := range change.Added {
-			fmt.Fprintf(&b, "  · %s：倍率 %g\n", c.GroupName, c.NewRatio)
+	fmt.Fprintf(b, "\n## %s（%d）\n", title, len(items))
+	lastChannelID := uint(0)
+	for _, item := range items {
+		if item.ChannelID != lastChannelID {
+			fmt.Fprintf(b, "\n### %s\n", item.ChannelName)
+			lastChannelID = item.ChannelID
 		}
-	}
-	if len(change.Removed) > 0 {
-		fmt.Fprintf(&b, "\n删除 %d 个分组：\n", len(change.Removed))
-		for _, c := range change.Removed {
-			fmt.Fprintf(&b, "  · %s：原倍率 %g\n", c.GroupName, c.OldRatio)
-		}
-	}
-	fmt.Fprintf(&b, "\n时间：%s", now.Format("2006-01-02 15:04"))
-
-	return Message{
-		Event:     storage.EventRateStructureChanged,
-		ChannelID: channel.ID,
-		ModelName: "",
-		Subject:   fmt.Sprintf("[分组变动通知] %s · 新增 %d / 删除 %d", channel.Name, len(change.Added), len(change.Removed)),
-		Body:      b.String(),
+		fmt.Fprintf(b, "- **%s**：%s\n", item.Change.GroupName, detail(item.Change))
 	}
 }
 

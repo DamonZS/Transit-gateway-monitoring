@@ -147,7 +147,6 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 	if dispatcher != nil {
 		dispatcher.UpdatePolicy(notify.Policy{
 			NotificationPrefix:                       cfg.App.NotificationPrefix,
-			BatchRateChanges:                         cfg.Notifications.BatchRateChanges,
 			MinChangePct:                             cfg.Notifications.MinChangePct,
 			BalanceLowCooldown:                       time.Duration(cfg.Notifications.BalanceLowCooldownMinutes) * time.Minute,
 			SubscriptionDailyRemainingThresholdPct:   cfg.Notifications.SubscriptionDailyRemainingThresholdPct,
@@ -168,6 +167,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 		gatewaySvc.UpdateProxyConfig(cfg.Proxy)
 		gatewaySvc.UpdateUpstreamConfig(cfg.Upstream)
 		gatewaySvc.UpdateGatewayConfig(gwCfg)
+		gatewaySvc.UpdatePricingConfig(cfg.Pricing)
 	}
 
 	newScheduler := factory(cfg.Scheduler, cfg.Proxy)
@@ -187,7 +187,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 		oldScheduler.Stop()
 	}
 
-	sections := []string{"app", "auth", "scheduler", "notifications", "retention", "proxy", "upstream", "gateway"}
+	sections := []string{"app", "auth", "scheduler", "notifications", "retention", "proxy", "upstream", "gateway", "pricing"}
 	if m.log != nil {
 		m.log.Info("runtime config applied",
 			"sections", sections,

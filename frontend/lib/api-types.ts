@@ -40,7 +40,6 @@ export type NotificationEvent =
   | "subscription_weekly_remaining_low"
   | "subscription_monthly_remaining_low"
   | "subscription_expiring"
-  | "upstream_sync_group_changed"
 
 export interface Channel {
   id: number
@@ -257,7 +256,6 @@ export interface SystemSchedulerConfig {
 }
 
 export interface SystemNotificationsConfig {
-  batchRateChanges: boolean
   minChangePct: number
   balanceLowCooldownMinutes: number
   subscriptionDailyRemainingThresholdPct: number
@@ -294,6 +292,9 @@ export interface SystemGatewayConfig {
   usageErrorMsgRunes: number
   usageErrorHeaderValueRunes: number
   usageErrorHeadersJSONBytes: number
+  streamKeepaliveSeconds: number
+  streamIdleTimeoutSeconds: number
+  streamMaxLineBytes: number
 }
 
 export interface SystemConfig {
@@ -500,96 +501,6 @@ export interface ChannelAPIKeyReveal {
   key: string
 }
 
-export interface UpstreamSyncTarget {
-  id: number
-  name: string
-  base_url: string
-  enabled: boolean
-  last_check_status?: string
-  last_check_at?: string | null
-  last_check_error?: string
-}
-
-export interface UpstreamSyncTargetGroup {
-  id: number
-  target_id: number
-  remote_group_id: number
-  name: string
-  platform?: string
-  ratio: number
-  status: string
-  sort: number
-  description?: string
-  last_sync_at?: string | null
-}
-
-export interface UpstreamSyncTargetProxy {
-  id: number
-  name: string
-  protocol: string
-  host: string
-  port: number
-  status: string
-}
-
-export type UpstreamSyncRateConvertMode = "raw" | "multiply_100" | "divide_100" | "custom"
-
-export interface UpstreamSyncAccount {
-  id?: number
-  source_channel_id: number
-  source_group_id?: number | null
-  source_group_name?: string
-  proxy_id?: number | null
-  concurrency: number
-  weight: number
-  rate_convert_mode: UpstreamSyncRateConvertMode
-  rate_convert_value: number
-  enabled: boolean
-  test_enabled: boolean
-  test_model?: string
-}
-
-export interface UpstreamSyncGroup {
-  id: number
-  display_name: string
-  name_template: string
-  name: string
-  target_id: number
-  target_group_ids: number[]
-  platform: string
-  model_limits_mode: string
-  model_limits?: string
-  pool_mode_enabled: boolean
-  pool_mode_retry_count: number
-  pool_mode_retry_status_codes?: string
-  custom_error_codes_enabled: boolean
-  custom_error_codes?: string
-  rate_sort_direction: "asc" | "desc"
-  accounts: UpstreamSyncAccount[]
-  enabled: boolean
-  apply_status?: string
-  apply_error?: string
-  last_applied_at?: string | null
-}
-
-export interface UpstreamSyncLog {
-  id: number
-  sync_group_id: number
-  target_id: number
-  action: string
-  success: boolean
-  message?: string
-  created_at: string
-}
-
-export interface UpstreamSyncLogPage {
-  items: UpstreamSyncLog[]
-  total: number
-  page: number
-  page_size: number
-  pages: number
-}
-
 // ---------- Gateway ----------
 
 export type GatewayKeyStatus = "active" | "disabled"
@@ -597,6 +508,29 @@ export type GatewayGroupStatus = "active" | "disabled"
 export type GatewayRateSortDirection = "asc" | "desc"
 export type GatewayRateConvertMode = "raw" | "multiply_100" | "divide_100" | "custom"
 export type GatewayModelsMode = "auto" | "manual" | "hybrid"
+export type GatewayServiceTier = "all" | "priority" | "flex"
+export type GatewayServiceTierAction = "filter" | "passthrough" | "block" | "force_priority"
+export type GatewayServiceTierKeyScope = "all" | "selected"
+
+export interface GatewayServiceTierRule {
+  tier: GatewayServiceTier
+  action: GatewayServiceTierAction
+  key_scope?: GatewayServiceTierKeyScope
+  key_ids?: number[]
+  /** 仅兼容旧版单 Key 规则；新规则请使用 key_ids。 */
+  key_id?: number
+  /** 仅兼容旧版按用户邮箱保存的规则。 */
+  user_email?: string
+  models?: string[]
+}
+
+export interface GatewaySystemPromptRule {
+  enabled: boolean
+  text: string
+  override: boolean
+  key_scope: "all" | "selected"
+  key_ids: number[]
+}
 /** 上游协议：auto / OpenAI Chat / OpenAI Responses / Anthropic；openai 为 chat 历史别名 */
 export type GatewayUpstreamProtocol =
   | "auto"
@@ -615,12 +549,14 @@ export interface GatewayGroup {
   rate_sort_direction: GatewayRateSortDirection
   /**
    * 渠道分组价格倍率重排：开启后，倍率扫描结束时按源分组实时倍率
-   * 重写路由顺序与账号计费倍率（对齐上游同步账号）。
+   * 重写路由顺序与账号计费倍率。
    */
   rate_resort_enabled?: boolean
   model_mapping?: string
   models_json?: string
   models_mode: GatewayModelsMode
+  service_tier_rules_json?: string
+  system_prompt_rules_json?: string
   /** 重试总开关：关闭则失败直接回显，不重试不顺延 */
   retry_enabled?: boolean
   /** 同一路由额外重试次数（不含首次） */
@@ -941,10 +877,19 @@ export interface GatewayUsageModelOption {
 export interface ModelPriceOverride {
   id: number
   model_name: string
+  billing_mode: "token" | "per_request" | "image" | "video"
   input_price_per_token: number
   output_price_per_token: number
   cache_creation_price_per_token: number
   cache_read_price_per_token: number
+  per_request_price: number
+  pricing_tiers_json: string
+  image_price_1k: number
+  image_price_2k: number
+  image_price_4k: number
+  video_price_480p: number
+  video_price_720p: number
+  video_price_1080p: number
   enabled: boolean
   created_at: string
   updated_at: string

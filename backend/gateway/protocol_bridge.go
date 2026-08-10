@@ -64,6 +64,47 @@ func (svc *Service) prepareUpstreamRequest(
 	return fwd, upstreamPath, converted, nil
 }
 
+// prepareUpstreamRequestWithToolBridge keeps the reversible tool mapping for
+// Responses requests that must be lowered to Chat Completions or Anthropic.
+func (svc *Service) prepareUpstreamRequestWithToolBridge(
+	body []byte,
+	inbound, upstream protocolKind,
+	model string,
+	stream bool,
+	inboundPath string,
+) (fwd []byte, upstreamPath string, converted bool, bridge protocol.ResponsesToolBridge, err error) {
+	in := protocol.NormalizeKind(inbound)
+	up := protocol.NormalizeKind(upstream)
+	if in != protocol.KindOpenAIResponses || protocol.IsPassthroughEndpoint(inboundPath) ||
+		(up != protocol.KindOpenAIChat && up != protocol.KindOpenAI && up != protocol.KindAnthropic) {
+		fwd, upstreamPath, converted, err = svc.prepareUpstreamRequest(body, inbound, upstream, model, stream, inboundPath)
+		return
+	}
+
+	fwd = RewriteModelInBody(body, model)
+	bridge, err = protocol.BuildResponsesToolBridge(fwd)
+	if err != nil {
+		return nil, "", false, protocol.ResponsesToolBridge{}, err
+	}
+	chat, builtBridge, convErr := protocol.ResponsesToOpenAIChatRequestWithToolBridge(fwd, model, stream)
+	if convErr != nil {
+		return nil, "", false, protocol.ResponsesToolBridge{}, convErr
+	}
+	bridge = builtBridge
+	if up == protocol.KindAnthropic {
+		fwd, err = protocol.OpenAIToAnthropicRequest(chat, model, stream)
+	} else {
+		fwd = chat
+	}
+	if err != nil {
+		return nil, "", false, protocol.ResponsesToolBridge{}, err
+	}
+	if stream && (up == protocol.KindOpenAIChat || up == protocol.KindOpenAI) {
+		fwd = EnsureStreamUsageOption(fwd, stream)
+	}
+	return fwd, protocol.PathFor(up, inboundPath), true, bridge, nil
+}
+
 // convertUpstreamResponse 将上游响应转回客户端协议。
 func (svc *Service) convertUpstreamResponse(
 	respBody []byte,
@@ -83,6 +124,32 @@ func (svc *Service) convertUpstreamResponse(
 		return protocol.ConvertStreamResponse(in, up, respBody, model, svc.wrapAsOpenAISSE, svc.tryExtractJSONObject)
 	}
 	return protocol.ConvertResponse(in, up, respBody, model)
+}
+
+func (svc *Service) convertUpstreamResponseWithToolBridge(
+	respBody []byte,
+	inbound, upstream protocolKind,
+	model string,
+	stream bool,
+	converted bool,
+	bridge protocol.ResponsesToolBridge,
+) []byte {
+	if !stream && converted && protocol.NormalizeKind(inbound) == protocol.KindOpenAIResponses {
+		var chat []byte
+		var err error
+		switch protocol.NormalizeKind(upstream) {
+		case protocol.KindOpenAIChat, protocol.KindOpenAI:
+			chat = respBody
+		case protocol.KindAnthropic:
+			chat, err = protocol.AnthropicToOpenAIResponse(respBody, model)
+		}
+		if err == nil && len(chat) > 0 {
+			if out, convErr := protocol.OpenAIChatToResponsesResponseWithToolBridge(chat, model, bridge); convErr == nil {
+				return out
+			}
+		}
+	}
+	return svc.convertUpstreamResponse(respBody, inbound, upstream, model, stream, converted)
 }
 
 // tryExtractJSONObject 从可能的 SSE 缓冲中取最后一段 JSON 对象（Responses 流结束时的完整事件）。

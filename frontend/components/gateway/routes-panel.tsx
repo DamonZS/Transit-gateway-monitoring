@@ -637,7 +637,7 @@ export function RoutesPanel({
                     className="w-32"
                     type="number"
                     step="0.01"
-                    title="账号计费倍率（与上游同步一致：原值显示源分组倍率）"
+                    title="账号计费倍率（原值显示源分组倍率）"
                     value={
                       (r.rate_convert_mode as string) === "custom"
                         ? String(r.rate_convert_value ?? 0)

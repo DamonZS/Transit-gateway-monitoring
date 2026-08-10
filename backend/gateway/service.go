@@ -141,3 +141,22 @@ func (s *Service) UpdateGatewayConfig(cfg config.GatewayConfig) {
 	defer s.mu.Unlock()
 	s.gatewayCfg = cfg.WithDefaults()
 }
+
+// StartPricing 启动模型价格远程同步。内置价目始终可用，远程失败不会中断网关。
+func (s *Service) StartPricing(cfg config.PricingConfig) {
+	if s != nil && s.Pricing != nil {
+		s.Pricing.Start(cfg, s.Log)
+	}
+}
+
+// UpdatePricingConfig 应用新配置并重启价格同步任务。
+func (s *Service) UpdatePricingConfig(cfg config.PricingConfig) {
+	s.StartPricing(cfg)
+}
+
+// Stop 停止网关后台任务。
+func (s *Service) Stop() {
+	if s != nil && s.Pricing != nil {
+		s.Pricing.Stop()
+	}
+}

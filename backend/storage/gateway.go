@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ---------- GatewayProviders（直连渠道） ----------
@@ -270,6 +271,26 @@ func (r *GatewayKeys) Delete(id uint) error {
 	return r.db.Delete(&GatewayKey{}, id).Error
 }
 
+// DeleteWithGroupMutation 在同一事务内更新所属组并删除 Key。
+func (r *GatewayKeys) DeleteWithGroupMutation(id uint, mutate func(*GatewayGroup) bool) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var key GatewayKey
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&key, id).Error; err != nil {
+			return err
+		}
+		var group GatewayGroup
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&group, key.GroupID).Error; err != nil {
+			return err
+		}
+		if mutate != nil && mutate(&group) {
+			if err := tx.Model(&GatewayGroup{}).Where("id = ?", group.ID).Update("system_prompt_rules_json", group.SystemPromptRulesJSON).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Delete(&key).Error
+	})
+}
+
 // TouchLastUsed 更新密钥最近使用时间。
 func (r *GatewayKeys) TouchLastUsed(id uint, at time.Time) error {
 	return r.db.Model(&GatewayKey{}).Where("id = ?", id).Updates(map[string]any{
@@ -428,7 +449,7 @@ func normalizeGatewayRoute(item *GatewayRoute) {
 	if item.UserAgentMode != GatewayUserAgentModeCustom {
 		item.UserAgentCustom = ""
 	}
-	// 非 custom 时 rate_convert_value 仅作占位，与上游同步一致置 1；
+	// 非 custom 时 rate_convert_value 仅作占位，与网关路由倍率换算一致置 1；
 	// billing_rate_multiplier 由前端按源分组换算写入（原值=源 ratio），
 	// 运行时计费以 RateForRoute 为准，此处不强制改写为 1。
 	if strings.TrimSpace(item.RateConvertMode) != "custom" && item.RateConvertValue == 0 {

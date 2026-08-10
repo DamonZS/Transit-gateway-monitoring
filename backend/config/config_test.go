@@ -16,6 +16,9 @@ func TestLoadAppliesUpstreamDefaults(t *testing.T) {
 	if cfg.Upstream.UserAgent != DefaultUpstreamUserAgent {
 		t.Fatalf("user agent = %q", cfg.Upstream.UserAgent)
 	}
+	if !cfg.Pricing.Enabled || cfg.Pricing.RemoteURL != DefaultPricingRemoteURL {
+		t.Fatalf("pricing = %#v", cfg.Pricing)
+	}
 }
 
 func TestUpstreamConfigWithDefaultsKeepsCustomUserAgent(t *testing.T) {

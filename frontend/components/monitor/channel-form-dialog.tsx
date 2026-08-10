@@ -688,7 +688,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
             <div>
               <p className="text-sm font-medium">仅显示已创建密钥的分组</p>
               <p className="text-xs text-muted-foreground">
-                开启后渠道卡片 / 分组对话框 / 倍率变动通知只关注已创建密钥的分组；网关与上游同步设置仍可看全部分组
+                开启后渠道卡片 / 分组对话框 / 倍率变动通知只关注已创建密钥的分组；网关与通知设置仍可看全部分组
               </p>
             </div>
             <Switch

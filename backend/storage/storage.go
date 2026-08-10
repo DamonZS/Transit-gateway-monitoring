@@ -119,6 +119,9 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := dropDeletedAtColumns(db); err != nil {
 		return err
 	}
+	if err := dropObsoleteRateSiteColumns(db); err != nil {
+		return err
+	}
 	// 仅 AutoMigrate 当前模型（网关未发布，不做「密钥→组」等历史数据迁移）
 	return db.AutoMigrate(
 		&Channel{},
@@ -133,12 +136,6 @@ func AutoMigrate(db *gorm.DB) error {
 		&NotificationLog{},
 		&NotificationCooldown{},
 		&MonitorLog{},
-		&UpstreamSyncTarget{},
-		&UpstreamSyncTargetGroup{},
-		&UpstreamSyncGroup{},
-		&UpstreamSyncAccount{},
-		&UpstreamSyncManagedAccount{},
-		&UpstreamSyncLog{},
 		&GatewayGroup{},
 		&GatewayKey{},
 		&GatewayRoute{},
@@ -146,6 +143,41 @@ func AutoMigrate(db *gorm.DB) error {
 		&GatewayUsageLog{},
 		&ModelPriceOverride{},
 	)
+}
+
+func dropObsoleteRateSiteColumns(db *gorm.DB) error {
+	targets := []struct {
+		table string
+		model any
+	}{
+		{table: "rate_snapshots", model: &RateSnapshot{}},
+		{table: "rate_change_logs", model: &RateChangeLog{}},
+	}
+	for _, target := range targets {
+		if !db.Migrator().HasTable(target.model) {
+			continue
+		}
+		hasColumn, err := tableHasColumn(db, target.table, "site_id")
+		if err != nil {
+			return fmt.Errorf("inspect obsolete %s.site_id: %w", target.table, err)
+		}
+		if !hasColumn {
+			continue
+		}
+		if err := db.Migrator().DropColumn(target.model, "site_id"); err != nil {
+			return fmt.Errorf("drop obsolete %s.site_id: %w", target.table, err)
+		}
+		hasColumn, err = tableHasColumn(db, target.table, "site_id")
+		if err != nil {
+			return fmt.Errorf("inspect obsolete %s.site_id after drop: %w", target.table, err)
+		}
+		if hasColumn && db.Dialector.Name() == "sqlite" {
+			if err := db.Exec("ALTER TABLE " + target.table + " DROP COLUMN site_id").Error; err != nil {
+				return fmt.Errorf("drop sqlite obsolete %s.site_id: %w", target.table, err)
+			}
+		}
+	}
+	return nil
 }
 
 func dropDeletedAtColumns(db *gorm.DB) error {

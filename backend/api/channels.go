@@ -652,7 +652,7 @@ func channelRates(c *gin.Context, d *Deps) {
 	}
 	// ?only_with_keys=1：仅返回"已创建密钥的分组"。
 	// 该参数由前端按渠道开关 channel.only_created_key_groups_enabled 拼接，
-	// 网关 / 上游同步 / 通知设置等全量场景不传该参数，仍返回完整 RateSnapshot。
+	// 网关 / 通知设置等全量场景不传该参数，仍返回完整 RateSnapshot。
 	if onlyWithKeys := c.Query("only_with_keys"); onlyWithKeys == "1" || strings.EqualFold(onlyWithKeys, "true") {
 		set, err := d.ChannelSvc.ListAPIKeyGroupSet(c.Request.Context(), id)
 		if err != nil {

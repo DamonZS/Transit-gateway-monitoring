@@ -90,7 +90,7 @@ func routeRateLess(a, b storage.GatewayRoute, rateA, rateB float64, desc bool) b
 }
 
 // OrderRoutesByRate 按倍率对全部路由重排（含禁用），用于列表展示与保存落库。
-// 对齐上游同步：列表顺序 = 排序结果 = 尝试顺序。
+// 列表顺序 = 排序结果 = 尝试顺序。
 func OrderRoutesByRate(routes []storage.GatewayRoute, groupsByChannel map[uint][]connector.APIKeyGroup, direction string) []storage.GatewayRoute {
 	if len(routes) <= 1 {
 		return routes
@@ -125,8 +125,8 @@ func OrderRoutesByRate(routes []storage.GatewayRoute, groupsByChannel map[uint][
 // SortRoutes 按倍率方向 + 权重 + position 排序（仅可调度路由，用于运行时 failover）。
 // direction: asc 低倍率优先；desc 高倍率优先。
 //
-// BillingRate 与上游同步「账号计费倍率」一致：即 RateForRoute 换算结果
-// （原值 / ×100 / ÷100 / 自定义），不再使用独立字段默认 1，避免计费失真。
+// BillingRate 即 RateForRoute 换算结果（原值 / ×100 / ÷100 / 自定义），
+// 不再使用独立字段默认 1，避免计费失真。
 func SortRoutes(routes []storage.GatewayRoute, groupsByChannel map[uint][]connector.APIKeyGroup, direction string, now time.Time, exclude map[uint]struct{}) []ScoredRoute {
 	out := make([]ScoredRoute, 0, len(routes))
 	for _, r := range routes {

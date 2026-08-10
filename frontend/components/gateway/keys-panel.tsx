@@ -167,7 +167,7 @@ export function KeysPanel({
                 {keys.length === 0 && (
                   <TableRow>
                     <TableCell
-                      colSpan={6}
+                      colSpan={7}
                       className="text-center text-muted-foreground"
                     >
                       组内暂无密钥，创建后客户端用该密钥访问 /v1/*

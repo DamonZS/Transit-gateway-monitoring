@@ -18,6 +18,7 @@ import (
 type AnthropicToResponsesStream struct {
 	Model  string
 	RespID string
+	bridge ResponsesToolBridge
 
 	createdSent   bool
 	completedSent bool
@@ -45,9 +46,14 @@ type AnthropicToResponsesStream struct {
 }
 
 func NewAnthropicToResponsesStream(model string) *AnthropicToResponsesStream {
+	return NewAnthropicToResponsesStreamWithToolBridge(model, ResponsesToolBridge{})
+}
+
+func NewAnthropicToResponsesStreamWithToolBridge(model string, bridge ResponsesToolBridge) *AnthropicToResponsesStream {
 	return &AnthropicToResponsesStream{
 		Model:  model,
 		RespID: generateResponsesStreamID("resp_"),
+		bridge: bridge,
 	}
 }
 
@@ -191,14 +197,7 @@ func (s *AnthropicToResponsesStream) handleBlockStart(payload map[string]any) []
 		// 严格 wire：function_call 必须带 arguments（可空串）
 		frames = append(frames, s.respEvent("response.output_item.added", map[string]any{
 			"output_index": s.outputIndex,
-			"item": map[string]any{
-				"type":      "function_call",
-				"id":        s.currentItemID,
-				"call_id":   s.currentCallID,
-				"name":      s.currentName,
-				"arguments": "",
-				"status":    "in_progress",
-			},
+			"item":         s.bridge.streamToolItem(s.currentName, s.currentItemID, s.currentCallID, "", "in_progress"),
 		}))
 	}
 	return frames
@@ -270,13 +269,16 @@ func (s *AnthropicToResponsesStream) handleBlockDelta(payload map[string]any) []
 			return frames
 		}
 		s.currentArgs += partial
-		frames = append(frames, s.respEvent("response.function_call_arguments.delta", map[string]any{
-			"output_index": s.outputIndex,
-			"item_id":      s.currentItemID,
-			"call_id":      s.currentCallID,
-			"name":         s.currentName,
-			"delta":        partial,
-		}))
+		if s.bridge.streamToolKind(s.currentName) == "function" {
+			name, _ := s.bridge.streamToolName(s.currentName)
+			frames = append(frames, s.respEvent("response.function_call_arguments.delta", map[string]any{
+				"output_index": s.outputIndex,
+				"item_id":      s.currentItemID,
+				"call_id":      s.currentCallID,
+				"name":         name,
+				"delta":        partial,
+			}))
+		}
 	}
 	return frames
 }
@@ -299,13 +301,25 @@ func (s *AnthropicToResponsesStream) handleBlockStop() [][]byte {
 		if args == "" {
 			args = "{}"
 		}
-		frames = append(frames, s.respEvent("response.function_call_arguments.done", map[string]any{
-			"output_index": s.outputIndex,
-			"item_id":      s.currentItemID,
-			"call_id":      s.currentCallID,
-			"name":         s.currentName,
-			"arguments":    args,
-		}))
+		switch s.bridge.streamToolKind(s.currentName) {
+		case "custom":
+			input := responsesCustomToolInput(args)
+			if input != "" {
+				frames = append(frames, s.respEvent("response.custom_tool_call_input.delta", map[string]any{
+					"output_index": s.outputIndex, "item_id": s.currentItemID, "delta": input,
+				}))
+			}
+			frames = append(frames, s.respEvent("response.custom_tool_call_input.done", map[string]any{
+				"output_index": s.outputIndex, "item_id": s.currentItemID, "call_id": s.currentCallID,
+				"name": s.currentName, "input": input,
+			}))
+		case "function":
+			name, _ := s.bridge.streamToolName(s.currentName)
+			frames = append(frames, s.respEvent("response.function_call_arguments.done", map[string]any{
+				"output_index": s.outputIndex, "item_id": s.currentItemID, "call_id": s.currentCallID,
+				"name": name, "arguments": args,
+			}))
+		}
 		frames = append(frames, s.closeItem()...)
 		return frames
 	case "message":
@@ -387,9 +401,7 @@ func (s *AnthropicToResponsesStream) closeItem() [][]byte {
 		if args == "" {
 			args = "{}"
 		}
-		item["call_id"] = callID
-		item["name"] = name
-		item["arguments"] = args
+		item = s.bridge.streamToolItem(name, itemID, callID, args, "completed")
 	case "message":
 		item["role"] = "assistant"
 		// 严格 wire：content 永远是数组
@@ -496,6 +508,7 @@ func (s *AnthropicToResponsesStream) respEvent(typ string, extra map[string]any)
 type ChatToResponsesStream struct {
 	Model  string
 	RespID string
+	bridge ResponsesToolBridge
 
 	createdSent   bool
 	completedSent bool
@@ -538,9 +551,14 @@ type chatToolStreamState struct {
 }
 
 func NewChatToResponsesStream(model string) *ChatToResponsesStream {
+	return NewChatToResponsesStreamWithToolBridge(model, ResponsesToolBridge{})
+}
+
+func NewChatToResponsesStreamWithToolBridge(model string, bridge ResponsesToolBridge) *ChatToResponsesStream {
 	return &ChatToResponsesStream{
 		Model:  model,
 		RespID: generateResponsesStreamID("resp_"),
+		bridge: bridge,
 		tools:  make(map[int]*chatToolStreamState),
 	}
 }
@@ -636,12 +654,13 @@ func (s *ChatToResponsesStream) FeedData(data string) [][]byte {
 							frames = append(frames, s.announceTool(st)...)
 						}
 						st.args += a
-						if st.announced {
+						if st.announced && s.bridge.streamToolKind(st.name) == "function" {
+							name, _ := s.bridge.streamToolName(st.name)
 							frames = append(frames, s.respEvent("response.function_call_arguments.delta", map[string]any{
 								"output_index": st.outIdx,
 								"item_id":      st.itemID,
 								"call_id":      st.callID,
-								"name":         st.name,
+								"name":         name,
 								"delta":        a,
 							}))
 						}
@@ -733,12 +752,13 @@ func (s *ChatToResponsesStream) Close() [][]byte {
 		}
 		if !st.announced {
 			frames = append(frames, s.announceTool(st)...)
-			if st.args != "" {
+			if st.args != "" && s.bridge.streamToolKind(st.name) == "function" {
+				name, _ := s.bridge.streamToolName(st.name)
 				frames = append(frames, s.respEvent("response.function_call_arguments.delta", map[string]any{
 					"output_index": st.outIdx,
 					"item_id":      st.itemID,
 					"call_id":      st.callID,
-					"name":         st.name,
+					"name":         name,
 					"delta":        st.args,
 				}))
 			}
@@ -747,21 +767,26 @@ func (s *ChatToResponsesStream) Close() [][]byte {
 		if args == "" {
 			args = "{}"
 		}
-		frames = append(frames, s.respEvent("response.function_call_arguments.done", map[string]any{
-			"output_index": st.outIdx,
-			"item_id":      st.itemID,
-			"call_id":      st.callID,
-			"name":         st.name,
-			"arguments":    args,
-		}))
-		item := map[string]any{
-			"type":      "function_call",
-			"id":        st.itemID,
-			"call_id":   st.callID,
-			"name":      st.name,
-			"arguments": args,
-			"status":    "completed",
+		switch s.bridge.streamToolKind(st.name) {
+		case "custom":
+			input := responsesCustomToolInput(args)
+			if input != "" {
+				frames = append(frames, s.respEvent("response.custom_tool_call_input.delta", map[string]any{
+					"output_index": st.outIdx, "item_id": st.itemID, "delta": input,
+				}))
+			}
+			frames = append(frames, s.respEvent("response.custom_tool_call_input.done", map[string]any{
+				"output_index": st.outIdx, "item_id": st.itemID, "call_id": st.callID,
+				"name": st.name, "input": input,
+			}))
+		case "function":
+			name, _ := s.bridge.streamToolName(st.name)
+			frames = append(frames, s.respEvent("response.function_call_arguments.done", map[string]any{
+				"output_index": st.outIdx, "item_id": st.itemID, "call_id": st.callID,
+				"name": name, "arguments": args,
+			}))
 		}
+		item := s.bridge.streamToolItem(st.name, st.itemID, st.callID, args, "completed")
 		s.finished = append(s.finished, item)
 		frames = append(frames, s.respEvent("response.output_item.done", map[string]any{
 			"output_index": st.outIdx,
@@ -881,20 +906,16 @@ func (s *ChatToResponsesStream) announceTool(st *chatToolStreamState) [][]byte {
 	if st.announced {
 		return nil
 	}
-	st.announced = true
 	if st.callID == "" {
 		st.callID = st.itemID
 	}
+	if st.name == "" && s.bridge.HasSpecialTools() {
+		return nil
+	}
+	st.announced = true
 	return [][]byte{s.respEvent("response.output_item.added", map[string]any{
 		"output_index": st.outIdx,
-		"item": map[string]any{
-			"type":      "function_call",
-			"id":        st.itemID,
-			"call_id":   st.callID,
-			"name":      st.name,
-			"arguments": "", // 严格 wire
-			"status":    "in_progress",
-		},
+		"item":         s.bridge.streamToolItem(st.name, st.itemID, st.callID, "", "in_progress"),
 	})}
 }
 

@@ -207,6 +207,11 @@ func (rt *Runtime) HandleCountTokens(c *gin.Context) {
 		rt.writeGatewayError(c, protocolAnthropic, http.StatusBadRequest, "invalid_request_error", "failed to read body")
 		return
 	}
+	body, err = rt.applySystemPrompt(auth.Group, auth.Key, "/v1/messages/count_tokens", protocol.KindAnthropic, body)
+	if err != nil {
+		rt.writeGatewayError(c, protocolAnthropic, http.StatusBadRequest, "invalid_request_error", "system prompt injection failed: "+err.Error())
+		return
+	}
 	// 尝试转发到第一条可用路由的 /v1/messages/count_tokens
 	routes, _ := rt.Routes.ListByGroupID(auth.Group.ID)
 	groupsByChannel := rt.loadGroupsByChannel(c.Request.Context(), routes)
@@ -262,29 +267,6 @@ func (rt *Runtime) HandleUsage(c *gin.Context) {
 		"key_id": auth.Key.ID,
 		"stats":  stats,
 		"recent": page.Items,
-	})
-}
-
-// HandleResponsesWebSocket GET /v1/responses — Codex/CLI 可能升级 WebSocket。
-// 完整 WS 桥接工作量大；先返回明确错误（非 404），避免客户端误判「路由不存在」。
-
-func (rt *Runtime) HandleResponsesWebSocket(c *gin.Context) {
-	reqID := rt.ensureGatewayRequestID(c)
-	if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
-		c.JSON(http.StatusNotImplemented, gin.H{
-			"error": gin.H{
-				"type":    "not_implemented_error",
-				"message": "Responses WebSocket is not implemented yet; use POST /v1/responses (SSE/HTTP) instead",
-			},
-			jsonKeyUpstreamOpsRequestID: reqID,
-		})
-		return
-	}
-	// 非 WS：当作发现说明
-	c.JSON(http.StatusOK, gin.H{
-		"message":                   "Use POST /v1/responses for Responses API",
-		"websocket":                 "not_implemented",
-		jsonKeyUpstreamOpsRequestID: reqID,
 	})
 }
 
@@ -347,6 +329,23 @@ func (rt *Runtime) HandleGeminiGenerate(c *gin.Context) {
 	var gem map[string]any
 	_ = json.Unmarshal(body, &gem)
 	var messages []any
+	if instruction, ok := gem["systemInstruction"].(map[string]any); ok {
+		var text strings.Builder
+		if parts, ok := instruction["parts"].([]any); ok {
+			for _, part := range parts {
+				partMap, ok := part.(map[string]any)
+				if !ok {
+					continue
+				}
+				if value, ok := partMap["text"].(string); ok {
+					text.WriteString(value)
+				}
+			}
+		}
+		if text.Len() > 0 {
+			messages = append(messages, map[string]any{"role": "system", "content": text.String()})
+		}
+	}
 	if contents, ok := gem["contents"].([]any); ok {
 		for _, raw := range contents {
 			cm, _ := raw.(map[string]any)

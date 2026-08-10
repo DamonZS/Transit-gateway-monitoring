@@ -72,11 +72,15 @@ func (s *Service) ScanAllRates(ctx context.Context) {
 		s.log.Error("list channels", "err", err)
 		return
 	}
+	batch := notify.RateNotificationBatch{}
 	for i := range list {
 		c := list[i]
-		if err := s.RefreshRates(ctx, &c); err != nil {
+		if err := s.refreshRates(ctx, &c, &batch); err != nil {
 			s.log.Warn("refresh rates failed", "channel", c.Name, "err", err)
 		}
+	}
+	if !batch.Empty() {
+		_ = s.dispatcher.DispatchRateNotificationBatch(ctx, batch)
 	}
 }
 
@@ -154,6 +158,17 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 
 // RefreshRates 单个渠道倍率刷新，可被 API 手动触发。
 func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
+	batch := notify.RateNotificationBatch{}
+	if err := s.refreshRates(ctx, c, &batch); err != nil {
+		return err
+	}
+	if !batch.Empty() {
+		_ = s.dispatcher.DispatchRateNotificationBatch(ctx, batch)
+	}
+	return nil
+}
+
+func (s *Service) refreshRates(ctx context.Context, c *storage.Channel, batch *notify.RateNotificationBatch) error {
 	resolved, conn, session, err := s.prepare(ctx, c)
 	if err != nil {
 		s.notifyError(ctx, c, storage.EventLoginFailed, "登录失败", err)
@@ -190,7 +205,7 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 	}
 
 	// "仅显示已创建密钥的分组"开关：开关开启时只派发"已挂密钥的分组"的 added/removed/changes
-	// 通知；RateSnapshot 本地存储仍按全量维护，确保网关 / 上游同步 / 通知设置等可继续读全分组。
+	// 通知；RateSnapshot 本地存储仍按全量维护，确保网关 / 通知设置等可继续读全分组。
 	// 拉 set 失败时不做过滤（保险：避免上游密钥接口抖动导致通知被全静音），仅日志告警。
 	var keyGroupSet *channel.APIKeyGroupSet
 	if c.OnlyCreatedKeyGroupsEnabled {
@@ -293,15 +308,14 @@ func (s *Service) RefreshRates(ctx context.Context, c *storage.Channel) error {
 			})
 		}
 	}
-	// 一次扫描的所有变化打包推送：去抖策略（合并 / 涨跌幅过滤）由 Dispatcher.Policy 决定。
-	if len(changes) > 0 {
-		_ = s.dispatcher.DispatchRateBatch(ctx, c, changes)
+	for _, change := range changes {
+		batch.Changed = append(batch.Changed, notify.ChannelRateChange{ChannelID: c.ID, ChannelName: c.Name, Change: change})
 	}
-	if len(added)+len(removed) > 0 {
-		_ = s.dispatcher.DispatchRateStructureBatch(ctx, c, notify.RateStructureChange{
-			Added:   added,
-			Removed: removed,
-		})
+	for _, change := range added {
+		batch.Added = append(batch.Added, notify.ChannelRateChange{ChannelID: c.ID, ChannelName: c.Name, Change: change})
+	}
+	for _, change := range removed {
+		batch.Removed = append(batch.Removed, notify.ChannelRateChange{ChannelID: c.ID, ChannelName: c.Name, Change: change})
 	}
 	if err := s.syncAnnouncements(ctx, c, resolved, conn, session); err != nil {
 		s.log.Warn("sync announcements failed", "channel", c.Name, "err", err)

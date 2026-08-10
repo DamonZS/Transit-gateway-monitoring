@@ -72,16 +72,77 @@ func (rt *Runtime) sseFrameIsTerminal(frame []byte) bool {
 	if strings.Contains(s, "event: response.completed") || strings.Contains(s, "event:response.completed") ||
 		strings.Contains(s, "event: response.done") || strings.Contains(s, "event:response.done") ||
 		strings.Contains(s, "event: response.failed") || strings.Contains(s, "event:response.failed") ||
-		strings.Contains(s, "event: response.incomplete") || strings.Contains(s, "event:response.incomplete") {
+		strings.Contains(s, "event: response.incomplete") || strings.Contains(s, "event:response.incomplete") ||
+		strings.Contains(s, "event: response.cancelled") || strings.Contains(s, "event:response.cancelled") ||
+		strings.Contains(s, "event: response.canceled") || strings.Contains(s, "event:response.canceled") {
 		return true
 	}
 	if strings.Contains(s, `"type":"response.completed"`) || strings.Contains(s, `"type": "response.completed"`) ||
 		strings.Contains(s, `"type":"response.done"`) || strings.Contains(s, `"type": "response.done"`) ||
 		strings.Contains(s, `"type":"response.failed"`) || strings.Contains(s, `"type": "response.failed"`) ||
-		strings.Contains(s, `"type":"response.incomplete"`) || strings.Contains(s, `"type": "response.incomplete"`) {
+		strings.Contains(s, `"type":"response.incomplete"`) || strings.Contains(s, `"type": "response.incomplete"`) ||
+		strings.Contains(s, `"type":"response.cancelled"`) || strings.Contains(s, `"type": "response.cancelled"`) ||
+		strings.Contains(s, `"type":"response.canceled"`) || strings.Contains(s, `"type": "response.canceled"`) {
 		return true
 	}
 	return false
+}
+
+// upstreamSSETerminal 判断上游协议层是否已经给出终态。转换器 Close 会补齐客户端帧，
+// 但不能把上游意外 EOF 伪装成成功完成。
+func (rt *Runtime) upstreamSSETerminal(eventName, data string, kind protocolKind) (terminal, success bool, message string) {
+	data = strings.TrimSpace(data)
+	if data == "[DONE]" {
+		return true, true, ""
+	}
+	name := strings.TrimSpace(eventName)
+	var payload map[string]any
+	if json.Unmarshal([]byte(data), &payload) == nil {
+		if typ, _ := payload["type"].(string); typ != "" {
+			name = typ
+		}
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch protocol.NormalizeKind(kind) {
+	case protocol.KindAnthropic:
+		switch name {
+		case "message_stop":
+			return true, true, ""
+		case "error":
+			return true, false, sseErrorMessage(payload, "upstream stream failed")
+		}
+	default:
+		switch name {
+		case "response.completed", "response.done", "response.incomplete":
+			if response, _ := payload["response"].(map[string]any); response != nil {
+				switch strings.ToLower(strings.TrimSpace(stringValue(response["status"]))) {
+				case "failed", "cancelled", "canceled":
+					return true, false, sseErrorMessage(response, "upstream response failed")
+				}
+			}
+			return true, true, ""
+		case "response.failed", "response.cancelled", "response.canceled", "error":
+			return true, false, sseErrorMessage(payload, "upstream response failed")
+		}
+	}
+	return false, false, ""
+}
+
+func sseErrorMessage(payload map[string]any, fallback string) string {
+	if response, _ := payload["response"].(map[string]any); response != nil {
+		payload = response
+	}
+	if errObj, _ := payload["error"].(map[string]any); errObj != nil {
+		if message := strings.TrimSpace(stringValue(errObj["message"])); message != "" {
+			return message
+		}
+	}
+	return fallback
+}
+
+func stringValue(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 // finalizeStreamClientDisconnect 在流结束时整理 client 断开标记：
@@ -161,6 +222,21 @@ func (rt *Runtime) writeStreamTerminalError(c *gin.Context, kind protocolKind, e
 			},
 		})
 		payload = []byte(fmt.Sprintf("event: error\ndata: %s\n\n", body))
+	} else if protocol.NormalizeKind(kind) == protocol.KindOpenAIResponses {
+		body, _ := json.Marshal(map[string]any{
+			"type": "response.failed",
+			"response": map[string]any{
+				"id":     "resp_gateway_error",
+				"object": "response",
+				"status": "failed",
+				"output": []any{},
+				"error": map[string]any{
+					"code":    errType,
+					"message": message,
+				},
+			},
+		})
+		payload = []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", body))
 	} else {
 		body, _ := json.Marshal(map[string]any{
 			"error": map[string]any{

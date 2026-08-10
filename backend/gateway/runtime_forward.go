@@ -32,13 +32,24 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 		rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "failed to read body")
 		return
 	}
+	body, err = rt.applySystemPrompt(group, key, path, kind, body)
+	if err != nil {
+		rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "system prompt injection failed: "+err.Error())
+		return
+	}
 	// legacy completions 不做跨协议
 	if kind == protocolOpenAI && strings.Contains(path, "/completions") && !strings.Contains(path, "/chat/") {
 		// 仅透传；若路由强制 anthropic 则报错
 	}
 
 	requestedModel := ExtractModelFromBody(body)
+	body, err = rt.applyServiceTierRules(group, key, kind, requestedModel, body)
+	if err != nil {
+		rt.writeGatewayError(c, kind, http.StatusForbidden, "permission_error", err.Error())
+		return
+	}
 	stream := ExtractStreamFlag(body)
+	billingInput := billingInputFromRequest(path, body)
 	serviceTier, reasoningEffort := ExtractMetaFromBody(body)
 	// thinking 是否开启：国产模型无 effort 档位时，按上游映射模型补默认 high（对齐 sub2api）
 	thinkingEnabled := bodyHasThinkingEnabled(body)
@@ -182,7 +193,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				upstreamKind = protocol.KindOpenAIChat
 			}
 
-			fwdBody, upstreamPath, converted, convErr := rt.prepareUpstreamRequest(body, kind, upstreamKind, upstreamModel, stream, path)
+			fwdBody, upstreamPath, converted, toolBridge, convErr := rt.prepareUpstreamRequestWithToolBridge(body, kind, upstreamKind, upstreamModel, stream, path)
 			if convErr != nil {
 				rt.writeGatewayError(c, kind, http.StatusBadRequest, "invalid_request_error", "protocol convert failed: "+convErr.Error())
 				return
@@ -200,6 +211,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 				UpstreamURL:       upstreamFullURL,
 				Attempt:           attemptNo,
 				AttemptKind:       attemptKind,
+				BillingInput:      billingInput,
 			}
 
 			start := time.Now()
@@ -216,9 +228,9 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			)
 			if stream {
 				// 真流式：边读上游 SSE 边写客户端。Committed 后禁止 retry/failover。
-				res := rt.forwardStream(
+				res := rt.forwardStreamWithToolBridge(
 					c.Request.Context(), c, target, upstreamPath, c.Request.Method, c.Request.Header, fwdBody,
-					kind, upstreamKind, upstreamModel, converted, attemptFTTimeout,
+					kind, upstreamKind, upstreamModel, converted, attemptFTTimeout, toolBridge,
 				)
 				status = res.Status
 				respHeaders = res.Headers
@@ -240,6 +252,7 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 			// 客户端在 commit 后、终端帧交付前断开：记 success=true + error_type=client。
 			// 若已写出 [DONE]/message_stop 后客户端才关连接，forwardStream 会清掉 client 标记，记普通成功。
 			if stream && streamCommitted {
+				usageMeta.BillingInput = billingInputWithResponse(billingInput, respBody)
 				onlyClientDisconnect := rt.isClientDisconnectAfterCommit(clientDisconnected, streamErr)
 				// 仅客户端断开仍算业务成功；真实 stream 错误才算失败。
 				success := streamErr == nil || onlyClientDisconnect
@@ -407,7 +420,8 @@ func (rt *Runtime) HandleForward(c *gin.Context, path string, kind protocolKind)
 
 			// 非流式成功：整包转换后写出
 			tokens := rt.parseUsageByKind(respBody, false, upstreamKind)
-			clientBody := rt.convertUpstreamResponse(respBody, kind, upstreamKind, upstreamModel, false, converted)
+			usageMeta.BillingInput = billingInputWithResponse(billingInput, respBody)
+			clientBody := rt.convertUpstreamResponseWithToolBridge(respBody, kind, upstreamKind, upstreamModel, false, converted, toolBridge)
 			if converted && rt.Log != nil && len(clientBody) == 0 && len(respBody) > 0 {
 				rt.Log.Warn("response convert produced empty body")
 			}

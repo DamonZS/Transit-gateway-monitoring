@@ -24,6 +24,7 @@ type Config struct {
 	Proxy         ProxyConfig         `mapstructure:"proxy" yaml:"proxy" json:"proxy"`
 	Upstream      UpstreamConfig      `mapstructure:"upstream" yaml:"upstream" json:"upstream"`
 	Gateway       GatewayConfig       `mapstructure:"gateway" yaml:"gateway" json:"gateway"`
+	Pricing       PricingConfig       `mapstructure:"pricing" yaml:"pricing" json:"pricing"`
 	Log           LogConfig           `mapstructure:"log" yaml:"log" json:"log"`
 }
 
@@ -106,8 +107,6 @@ type RetentionConfig struct {
 
 // NotificationsConfig 通知去抖策略。所有字段都是"少烦我"取向，默认不丢消息只合并。
 //
-//   - BatchRateChanges：同次扫描中将多个分组的变化合并成 1 条消息，避免上游一次大调价
-//     瞬间发出 30+ 条通知刷屏。默认 true。
 //   - MinChangePct：涨跌幅 < X% 的 rate_changed 跳过推送（仍会写入 rate_change_logs）。
 //     0 = 全发，对应原始行为。
 //   - BalanceLowCooldownMinutes：同一渠道的 balance_low 在 X 分钟内不重复推送。
@@ -116,7 +115,6 @@ type RetentionConfig struct {
 //   - SendMaxAttempts：单条通知发送失败时最多尝试次数（含首次）。
 //     1 = 不重试。重试采用指数退避：1s / 2s / 4s …，上限 30s。
 type NotificationsConfig struct {
-	BatchRateChanges                         bool    `mapstructure:"batchRateChanges" yaml:"batchRateChanges" json:"batchRateChanges"`
 	MinChangePct                             float64 `mapstructure:"minChangePct" yaml:"minChangePct" json:"minChangePct"`
 	BalanceLowCooldownMinutes                int     `mapstructure:"balanceLowCooldownMinutes" yaml:"balanceLowCooldownMinutes" json:"balanceLowCooldownMinutes"`
 	SubscriptionDailyRemainingThresholdPct   float64 `mapstructure:"subscriptionDailyRemainingThresholdPct" yaml:"subscriptionDailyRemainingThresholdPct" json:"subscriptionDailyRemainingThresholdPct"`
@@ -151,11 +149,52 @@ const (
 	DefaultGatewayUsageErrorMsgRunes         = 500
 	DefaultGatewayUsageErrorHeaderValueRunes = 8 * 1024
 	DefaultGatewayUsageErrorHeadersJSONBytes = 64 * 1024
+	DefaultGatewayStreamKeepaliveSeconds     = 15
+	DefaultGatewayStreamIdleTimeoutSeconds   = 120
+	DefaultGatewayStreamMaxLineBytes         = 8 << 20
 )
 
 type UpstreamConfig struct {
 	TimeoutSeconds int    `mapstructure:"timeoutSeconds" yaml:"timeoutSeconds" json:"timeoutSeconds"`
 	UserAgent      string `mapstructure:"userAgent" yaml:"userAgent" json:"userAgent"`
+}
+
+// PricingConfig 是网关模型价目表的远程同步配置。
+type PricingConfig struct {
+	Enabled                  bool   `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
+	RemoteURL                string `mapstructure:"remoteURL" yaml:"remoteURL" json:"remoteURL"`
+	HashURL                  string `mapstructure:"hashURL" yaml:"hashURL" json:"hashURL"`
+	DataDir                  string `mapstructure:"dataDir" yaml:"dataDir" json:"dataDir"`
+	FallbackFile             string `mapstructure:"fallbackFile" yaml:"fallbackFile" json:"fallbackFile"`
+	UpdateIntervalHours      int    `mapstructure:"updateIntervalHours" yaml:"updateIntervalHours" json:"updateIntervalHours"`
+	HashCheckIntervalMinutes int    `mapstructure:"hashCheckIntervalMinutes" yaml:"hashCheckIntervalMinutes" json:"hashCheckIntervalMinutes"`
+}
+
+const (
+	DefaultPricingRemoteURL = "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json"
+	DefaultPricingHashURL   = "https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256"
+)
+
+func (p PricingConfig) WithDefaults() PricingConfig {
+	if strings.TrimSpace(p.RemoteURL) == "" {
+		p.RemoteURL = DefaultPricingRemoteURL
+	}
+	if strings.TrimSpace(p.HashURL) == "" {
+		p.HashURL = DefaultPricingHashURL
+	}
+	if strings.TrimSpace(p.DataDir) == "" {
+		p.DataDir = "./data"
+	}
+	if strings.TrimSpace(p.FallbackFile) == "" {
+		p.FallbackFile = "./backend/gateway/pricing/default_prices.json"
+	}
+	if p.UpdateIntervalHours <= 0 {
+		p.UpdateIntervalHours = 24
+	}
+	if p.HashCheckIntervalMinutes <= 0 {
+		p.HashCheckIntervalMinutes = 10
+	}
+	return p
 }
 
 func (u UpstreamConfig) WithDefaults() UpstreamConfig {
@@ -186,6 +225,12 @@ type GatewayConfig struct {
 	UsageErrorMsgRunes         int `mapstructure:"usageErrorMsgRunes" yaml:"usageErrorMsgRunes" json:"usageErrorMsgRunes"`
 	UsageErrorHeaderValueRunes int `mapstructure:"usageErrorHeaderValueRunes" yaml:"usageErrorHeaderValueRunes" json:"usageErrorHeaderValueRunes"`
 	UsageErrorHeadersJSONBytes int `mapstructure:"usageErrorHeadersJSONBytes" yaml:"usageErrorHeadersJSONBytes" json:"usageErrorHeadersJSONBytes"`
+	// StreamKeepaliveSeconds 已提交 SSE 流的下游保活间隔（秒）。
+	StreamKeepaliveSeconds int `mapstructure:"streamKeepaliveSeconds" yaml:"streamKeepaliveSeconds" json:"streamKeepaliveSeconds"`
+	// StreamIdleTimeoutSeconds 上游 SSE 收到有效数据后的最大空闲时长（秒）。
+	StreamIdleTimeoutSeconds int `mapstructure:"streamIdleTimeoutSeconds" yaml:"streamIdleTimeoutSeconds" json:"streamIdleTimeoutSeconds"`
+	// StreamMaxLineBytes 上游单条 SSE 行最大字节数。
+	StreamMaxLineBytes int `mapstructure:"streamMaxLineBytes" yaml:"streamMaxLineBytes" json:"streamMaxLineBytes"`
 }
 
 func (g GatewayConfig) WithDefaults() GatewayConfig {
@@ -219,6 +264,15 @@ func (g GatewayConfig) WithDefaults() GatewayConfig {
 	if g.UsageErrorHeadersJSONBytes <= 0 {
 		g.UsageErrorHeadersJSONBytes = DefaultGatewayUsageErrorHeadersJSONBytes
 	}
+	if g.StreamKeepaliveSeconds <= 0 {
+		g.StreamKeepaliveSeconds = DefaultGatewayStreamKeepaliveSeconds
+	}
+	if g.StreamIdleTimeoutSeconds <= 0 {
+		g.StreamIdleTimeoutSeconds = DefaultGatewayStreamIdleTimeoutSeconds
+	}
+	if g.StreamMaxLineBytes <= 0 {
+		g.StreamMaxLineBytes = DefaultGatewayStreamMaxLineBytes
+	}
 	return g
 }
 
@@ -235,6 +289,20 @@ func (g GatewayConfig) ForwardTimeout() time.Duration {
 func (g GatewayConfig) ModelsCacheTTL() time.Duration {
 	g = g.WithDefaults()
 	return time.Duration(g.ModelsCacheTTLSeconds) * time.Second
+}
+
+func (g GatewayConfig) StreamKeepalive() time.Duration {
+	g = g.WithDefaults()
+	return time.Duration(g.StreamKeepaliveSeconds) * time.Second
+}
+
+func (g GatewayConfig) StreamIdleTimeout() time.Duration {
+	g = g.WithDefaults()
+	return time.Duration(g.StreamIdleTimeoutSeconds) * time.Second
+}
+
+func (g GatewayConfig) StreamMaxLineSize() int {
+	return g.WithDefaults().StreamMaxLineBytes
 }
 
 type LogConfig struct {
@@ -324,6 +392,7 @@ func load(path string, withEnv bool) (*Config, string, error) {
 	}
 	cfg.Upstream = cfg.Upstream.WithDefaults()
 	cfg.Gateway = cfg.Gateway.WithDefaults()
+	cfg.Pricing = cfg.Pricing.WithDefaults()
 	return cfg, v.ConfigFileUsed(), nil
 }
 
@@ -403,9 +472,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.username", "admin")
 	v.SetDefault("auth.sessionTTLHours", 168) // 7 天
 
-	// 通知去抖：默认开合并、不过滤涨跌幅、balance_low 1h 内不重复、失败重试 3 次。
-	// 即"默认行为是合并刷屏 + 不重复 balance_low + 抗短时网络抖动"，不丢任何 rate_changed 事件。
-	v.SetDefault("notifications.batchRateChanges", true)
+	// 通知去抖：不过滤涨跌幅、balance_low 1h 内不重复、失败重试 3 次。
+	// 全渠道倍率变化始终在一次扫描结束后合并发送。
 	v.SetDefault("notifications.minChangePct", 0)
 	v.SetDefault("notifications.balanceLowCooldownMinutes", 60)
 	v.SetDefault("notifications.subscriptionDailyRemainingThresholdPct", 0)
@@ -422,6 +490,13 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("upstream.timeoutSeconds", DefaultUpstreamTimeoutSeconds)
 	v.SetDefault("upstream.userAgent", DefaultUpstreamUserAgent)
+	v.SetDefault("pricing.enabled", true)
+	v.SetDefault("pricing.remoteURL", DefaultPricingRemoteURL)
+	v.SetDefault("pricing.hashURL", DefaultPricingHashURL)
+	v.SetDefault("pricing.dataDir", "./data")
+	v.SetDefault("pricing.fallbackFile", "./backend/gateway/pricing/default_prices.json")
+	v.SetDefault("pricing.updateIntervalHours", 24)
+	v.SetDefault("pricing.hashCheckIntervalMinutes", 10)
 
 	v.SetDefault("gateway.tempPauseSeconds", DefaultGatewayTempPauseSeconds)
 	v.SetDefault("gateway.forwardTimeoutSeconds", DefaultGatewayForwardTimeoutSeconds)
@@ -432,6 +507,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.usageErrorMsgRunes", DefaultGatewayUsageErrorMsgRunes)
 	v.SetDefault("gateway.usageErrorHeaderValueRunes", DefaultGatewayUsageErrorHeaderValueRunes)
 	v.SetDefault("gateway.usageErrorHeadersJSONBytes", DefaultGatewayUsageErrorHeadersJSONBytes)
+	v.SetDefault("gateway.streamKeepaliveSeconds", DefaultGatewayStreamKeepaliveSeconds)
+	v.SetDefault("gateway.streamIdleTimeoutSeconds", DefaultGatewayStreamIdleTimeoutSeconds)
+	v.SetDefault("gateway.streamMaxLineBytes", DefaultGatewayStreamMaxLineBytes)
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")

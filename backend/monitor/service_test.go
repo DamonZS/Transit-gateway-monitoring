@@ -317,8 +317,7 @@ func TestRefreshRatesEmitsRateAddedAndRemoved(t *testing.T) {
 
 	channelSvc := channel.NewService(channels, authSessions, captchas, rates, monitorLogs, cipher)
 	dispatcher := notify.NewDispatcher(notifies, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)), notify.Policy{
-		BatchRateChanges: true,
-		SendMaxAttempts:  1,
+		SendMaxAttempts: 1,
 	})
 	svc := NewService(channels, announcements, rates, monitorLogs, channelSvc, dispatcher, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -353,20 +352,21 @@ func TestRefreshRatesEmitsRateAddedAndRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list logs: %v", err)
 	}
-	var structureChanged int
+	var rateBatch int
 	for _, log := range logs {
-		if log.Event == storage.EventRateStructureChanged {
-			structureChanged++
-			if !strings.Contains(log.Subject, "[分组变动通知]") ||
-				!strings.Contains(log.Subject, "新增 1 / 删除 1") ||
+		if log.Event == storage.EventRateChanged {
+			rateBatch++
+			if !strings.Contains(log.Subject, "渠道分组变动") ||
+				!strings.Contains(log.Subject, "1 个渠道 · 2 项") ||
+				!strings.Contains(log.Body, "# 渠道分组变动") ||
 				!strings.Contains(log.Body, "gamma") ||
 				!strings.Contains(log.Body, "alpha") {
-				t.Fatalf("unexpected structure change log = %#v", log)
+				t.Fatalf("unexpected rate batch log = %#v", log)
 			}
 		}
 	}
-	if structureChanged != 1 {
-		t.Fatalf("structureChanged=%d logs=%#v", structureChanged, logs)
+	if rateBatch != 1 {
+		t.Fatalf("rateBatch=%d logs=%#v", rateBatch, logs)
 	}
 	if got := webhookHits.Load(); got != 1 {
 		t.Fatalf("webhook hits = %d, want 1", got)
@@ -476,8 +476,7 @@ func TestRefreshRatesAfterChannelReuseDoesNotEmitOldStructureChange(t *testing.T
 
 	channelSvc := channel.NewService(channels, authSessions, captchas, rates, monitorLogs, cipher)
 	dispatcher := notify.NewDispatcher(notifies, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)), notify.Policy{
-		BatchRateChanges: true,
-		SendMaxAttempts:  1,
+		SendMaxAttempts: 1,
 	})
 	svc := NewService(channels, announcements, rates, monitorLogs, channelSvc, dispatcher, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -581,8 +580,7 @@ func TestRateEventSubscriptionFiltersGroups(t *testing.T) {
 
 	channelSvc := channel.NewService(channels, authSessions, captchas, rates, monitorLogs, cipher)
 	dispatcher := notify.NewDispatcher(notifies, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)), notify.Policy{
-		BatchRateChanges: true,
-		SendMaxAttempts:  1,
+		SendMaxAttempts: 1,
 	})
 	svc := NewService(channels, announcements, rates, monitorLogs, channelSvc, dispatcher, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -601,14 +599,14 @@ func TestRateEventSubscriptionFiltersGroups(t *testing.T) {
 	}
 	var foundAddedBeta, foundRemovedBeta bool
 	for _, log := range logs {
-		if log.Event != storage.EventRateStructureChanged {
+		if log.Event != storage.EventRateChanged {
 			continue
 		}
-		if strings.Contains(log.Subject, "新增 1 / 删除 0") &&
+		if strings.Contains(log.Body, "## 新增分组（1）") &&
 			strings.Contains(log.Body, "beta") {
 			foundAddedBeta = true
 		}
-		if strings.Contains(log.Subject, "新增 0 / 删除 1") &&
+		if strings.Contains(log.Body, "## 移除分组（1）") &&
 			strings.Contains(log.Body, "beta") {
 			foundRemovedBeta = true
 		}

@@ -95,7 +95,13 @@ func (a *AdminService) UpdateKey(id uint, in UpdateKeyInput) (*storage.GatewayKe
 
 // DeleteKey 删除密钥。
 func (a *AdminService) DeleteKey(id uint) error {
-	return a.Keys.Delete(id)
+	return a.Keys.DeleteWithGroupMutation(id, func(group *storage.GatewayGroup) bool {
+		rules, changed := removeSystemPromptKeyID(group.SystemPromptRulesJSON, id)
+		if changed {
+			group.SystemPromptRulesJSON = rules
+		}
+		return changed
+	})
 }
 
 // RevealKey 返回密钥明文。

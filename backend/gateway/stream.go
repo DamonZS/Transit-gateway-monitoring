@@ -9,12 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const (
-	defaultStreamKeepalive   = 15 * time.Second
-	defaultStreamIdleTimeout = 120 * time.Second
-	maxSSELineSize           = 8 << 20 // 8 MiB
-)
-
 // streamAttemptResult 单次流式转发结果。
 // Committed=true 表示已向客户端写出有效 SSE，禁止 retry/failover。
 // DownstreamComplete=true 表示已成功向客户端写出流式终端帧（[DONE] / message_stop 等）；

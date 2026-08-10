@@ -35,14 +35,17 @@ func (rt *Runtime) recordUsage(
 	// 对齐 sub2api RecordUsage：OpenAI 总输入含 cache 明细 → 拆互斥桶再计费/落库
 	tokens = SplitOpenAIUsageBuckets(tokens)
 	pricing := rt.Pricing.Resolve(priceModel)
-	cost := CalculateCost(pricing, tokens, rate, billingRate)
+	if pricing.BillingMode == BillingModeToken && meta.BillingInput.EndpointMode != "" {
+		pricing.BillingMode = meta.BillingInput.EndpointMode
+	}
+	cost := CalculateCostWithBillingInput(pricing, tokens, rate, billingRate, meta.ServiceTier, meta.BillingInput)
 	reqType := storage.GatewayRequestTypeSync
 	if stream {
 		reqType = storage.GatewayRequestTypeStream
 	}
-	billingMode := "token"
-	if tokens.ImageOutputTokens > 0 {
-		billingMode = "image"
+	billingMode := cost.BillingMode
+	if billingMode == "" {
+		billingMode = string(BillingModeToken)
 	}
 	sourceGroupName := strings.TrimSpace(route.SourceGroupName)
 	if sourceGroupName == "" || rt.isSourceGroupIDPlaceholder(sourceGroupName) {
@@ -134,7 +137,7 @@ func (rt *Runtime) recordUsage(
 		AccountStatsCost:      cost.TotalCost,
 		RateMultiplier:        rate,
 		BillingRateMultiplier: billingRate,
-		// 与上游同步账号计费倍率一致：账户侧统计用换算后的有效倍率，而非独立默认 1
+		// 账户侧统计用换算后的有效倍率（与路由计费倍率一致），而非独立默认 1
 		AccountRateMultiplier: rate,
 		Stream:                stream,
 		StatusCode:            status,

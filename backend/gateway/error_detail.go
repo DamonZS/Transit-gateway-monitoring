@@ -26,6 +26,7 @@ type usageRecordMeta struct {
 	Attempt           int
 	AttemptKind       string
 	CooldownUntil     *time.Time
+	BillingInput      BillingInput
 }
 
 // usageErrorInfo 失败请求的结构化错误信息（摘要 + 上游原文）。

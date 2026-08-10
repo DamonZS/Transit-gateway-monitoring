@@ -4,7 +4,7 @@
 
 > 本项目基于 [worryzyy/upstream-hub](https://github.com/worryzyy/upstream-hub) 二次开发，感谢原作者 [@worryzyy](https://github.com/worryzyy) 的开源工作。
 
-> UpstreamOps 是一个面向 NewAPI / Sub2API 上游站点的集中监控与运维面板，用来统一管理上游账号、查看余额与消费、同步模型倍率、管理 Sub2API 上游同步、追踪倍率变化、维护上游 API Key、发起充值/兑换，并通过多种通知渠道推送余额告警、倍率变更、登录异常、监控异常和上游公告。
+> UpstreamOps 是一个面向 NewAPI / Sub2API 上游站点的集中监控与运维面板，用来统一管理上游账号、查看余额与消费、同步模型倍率、追踪倍率变化、维护上游 API Key、发起充值/兑换，并通过多种通知渠道推送余额告警、倍率变更、登录异常、监控异常和上游公告。
 同时内置 OpenAI / Claude / Responses 兼容的请求转发网关：可创建网关密钥、绑定同步渠道或直连上游、按倍率与权重调度、协议互转、故障自动切换，并记录每次请求的用量与费用参考。
 
 
@@ -34,7 +34,7 @@ UpstreamOps 主要解决这些痛点：
 - 减少人工巡检：定时同步余额、消费、倍率和订阅用量，不需要反复打开不同后台。
 - 及时发现风险：余额低、倍率变化、登录失败、监控失败、订阅余量不足和订阅到期都可以推送通知。
 - 保留变化记录：倍率变化、余额快照、通知日志和上游公告都会落库，方便回看问题发生时间。
-- 简化日常运维：常用的 API Key 管理、充值、兑换、订阅购买、续订和 Sub2API 上游同步可以在同一个入口处理。
+- 简化日常运维：常用的 API Key 管理、充值、兑换、订阅购买和续订可以在同一个入口处理。
 - 适配复杂网络环境：支持全局代理，并可按上游渠道、通知渠道、验证码服务分别决定是否走代理。
 
 它适合需要长期维护多个上游账号、关注余额和倍率变化、希望把上游运维从“人工看后台”变成“集中监控和主动告警”的场景。
@@ -72,7 +72,7 @@ UpstreamOps 主要解决这些痛点：
   - **同步渠道**：绑定已监控的 NewAPI / Sub2API 渠道 + 源分组；可「确保上游密钥」自动创建/复用专用 API Key。
   - **直连渠道（Provider）**：在网关内维护 base URL、API Key、默认计费倍率、鉴权样式与代理开关，无需先做监控渠道。
 - 路由调度：源分组倍率换算（raw / ×100 / ÷100 / custom）+ 权重；组级升序/降序；可开启「倍率扫描后自动重排」。
-- 可视化模型映射（A→B、`*` 通配）与模型列表（上游同步去重 / 自定义 / auto·manual·hybrid）；支持按路由预览、同步与探测。
+- 可视化模型映射（A→B、`*` 通配）与模型列表（从上游拉取去重 / 自定义 / auto·manual·hybrid）；支持按路由预览、同步与探测。
 - **协议互转**（含非流式与 SSE 增量）：
   - OpenAI Chat ↔ Anthropic Messages
   - OpenAI Chat ↔ OpenAI Responses
@@ -80,9 +80,14 @@ UpstreamOps 主要解决这些痛点：
   - 路由 `upstream_protocol`：`auto` / `openai`（Chat）/ `openai_responses` / `anthropic`
 - 故障转移：网络错误、429、5xx 临时暂停并顺延；组可开「4xx 顺延」；支持组级重试次数、最大切换次数、冷却秒数。
 - **首字超时**（可选）：在仍有可顺延路由时，对首字节等待限时，加速切换到下一条路由。
+- **系统提示词注入**（组级）：按规则顺序注入，可作用于全部 Key 或指定 Key；覆盖 Chat `system`、Responses `instructions`、Anthropic `system`（HTTP 与 Responses WebSocket）。
+- **`service_tier` 策略**（组级）：匹配 `all` / `default` / `priority` / `flex`（并规范化 `fast` → `priority`）；动作支持透传、过滤、强制 `default` / `priority`、或拦截。
+- **Responses WebSocket**：`/v1/responses` 支持 Upgrade；会话中不可切换协议，仅 Responses 能力路由可接入。
+- **Responses 工具桥接**：Responses→Chat/Anthropic 降级时保留 custom tools、namespaced tools 与 `tool_search` 往返语义。
+- **图片 / 视频计费输入**：从 image/video 接口与 Responses 图片生成工具用量解析请求数、分辨率档位与时长，用于费用估算。
 - User-Agent：路由级 `passthrough` / `group` / `custom`；管理侧拉模型、探测会回落默认 UA。
 - 使用记录对齐 sub2api 字段：endpoint、协议、tokens（含缓存读写分桶）、费用、延迟、首字延迟、成功/失败与上游错误详情；提供列表、stats、模型筛选项与清理。
-- 计费：内置单价表（可覆盖）+ `actual_cost = base_cost × 账号计费倍率`（与上游同步倍率换算一致）。
+- 计费：内置单价表（可覆盖）+ `actual_cost = base_cost × 账号计费倍率`（共用倍率换算规则）。
 - 运行时参数（系统设置 `gateway` 段可热更新）：转发超时、模型列表缓存 TTL、默认暂停秒数、批量运维并发、用量错误落库截断等。
 - 管理入口：Dock「请求网关」页面（`/gateway`）；管理 API 前缀 `/api/gateway/*`（需后台鉴权）。
 
@@ -98,20 +103,8 @@ UpstreamOps 主要解决这些痛点：
 - 支持 Cloudflare Turnstile 打码配置，适用于开启 Turnstile 的上游登录场景。
 - 支持在渠道卡片中打开上游站点地址。
 - 支持在渠道卡片中清空已保存的登录信息。
-- 支持「仅显示已创建密钥的分组」开关：开启后渠道卡片、分组对话框、倍率面板和倍率变动通知只关注已创建密钥的分组；网关转发、上游同步和通知设置仍可看到全部分组，本地倍率快照也始终保留全量。
+- 支持「仅显示已创建密钥的分组」开关：开启后渠道卡片、分组对话框、倍率面板和倍率变动通知只关注已创建密钥的分组；网关转发和通知设置仍可看到全部分组，本地倍率快照也始终保留全量。
 - 删除上游渠道时会自动清理相关快照、倍率、公告、通知冷却和通知日志。
-
-### Sub2API 上游同步管理
-
-- 系统设置页新增“上游动态同步”页签，用于管理可写入的 Sub2API 目标上游。
-- 支持保存目标上游地址和加密的 Admin API Key，并执行连通性检测、目标分组同步和代理列表查询。
-- 支持按源渠道、源分组、目标分组、代理、并发、权重、倍率换算、模型限制、池模式和自定义错误码维护同步分组与同步账号。
-- 支持同步源渠道模型或使用自定义模型列表，并可在应用同步前查询源模型。
-- 支持为同步账号选择测试模型；测试失败时会禁用对应目标账号调度。
-- 分组名称模板支持 `{同步分组ID}`、`{渠道ID}`、`{源分组ID}` 占位符。
-- 支持手动应用同步、删除托管对象和分页查看执行日志。
-- 倍率定时扫描完成后会自动重新应用已启用的同步分组。
-- 同步分组变更和应用结果可通过 `upstream_sync_group_changed` 事件通知。
 
 ### 余额与消费监控
 
@@ -323,7 +316,7 @@ IMAGE_TAG=latest
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.8
+IMAGE_TAG=v0.0.9
 ```
 
 ## MySQL 部署
@@ -711,7 +704,6 @@ Webhook 请求体示例：
 - `subscription_weekly_remaining_low`：订阅周剩余用量低于阈值。
 - `subscription_monthly_remaining_low`：订阅月剩余用量低于阈值。
 - `subscription_expiring`：订阅即将到期。
-- `upstream_sync_group_changed`：Sub2API 同步分组或托管账号发生变更。
 
 ## 上游公告同步说明
 
@@ -914,7 +906,7 @@ x-api-key: sk-...
 
 - 仅 **enabled** 且未在临时暂停期内的路由参与调度。
 - 排序：有效倍率（组方向 asc/desc）→ 权重 → position。
-- 有效倍率（对齐上游同步账号逻辑）：
+- 有效倍率（网关路由倍率换算）：
   1. `custom` → 使用自定义值
   2. 能匹配源分组 → 用实时 ratio 按 raw / ×100 / ÷100 换算
   3. 否则用路由上已落库的「账号计费倍率」
@@ -1129,45 +1121,6 @@ API Key 管理依赖上游自身接口，不同上游字段存在差异。
 
 NewAPI 场景下会适配 NewAPI 的 token 接口。Sub2API 场景下会适配 Sub2API 的 keys 接口与 group 接口。
 
-## 上游同步管理说明
-
-系统设置页的“上游动态同步”页签用于管理 Sub2API 目标上游和本地同步分组。
-
-目标上游接口：
-
-```text
-GET    /api/upstream-sync/targets
-POST   /api/upstream-sync/targets
-PUT    /api/upstream-sync/targets/:id
-DELETE /api/upstream-sync/targets/:id
-POST   /api/upstream-sync/targets/:id/check
-POST   /api/upstream-sync/targets/:id/groups/sync
-GET    /api/upstream-sync/targets/:id/groups
-GET    /api/upstream-sync/targets/:id/proxies
-GET    /api/upstream-sync/source-models?channel_id=1&platform=openai
-```
-
-`channel_id` 为必填参数。`platform` 为空时按 OpenAI 兼容接口查询，也支持 `gemini`；可选参数包括 `source_group_id`、`source_group_name` 和 `sync_account_id`。
-
-同步分组接口：
-
-```text
-GET    /api/upstream-sync/sync-groups
-POST   /api/upstream-sync/sync-groups
-PUT    /api/upstream-sync/sync-groups/:id
-DELETE /api/upstream-sync/sync-groups/:id
-POST   /api/upstream-sync/sync-groups/:id/apply
-POST   /api/upstream-sync/sync-groups/:id/delete-managed
-GET    /api/upstream-sync/sync-groups/:id/logs?page=1&page_size=20
-```
-
-- 目标 Admin API Key 使用 `APP_SECRET` 加密保存。
-- “删除托管对象”会请求删除远端 Sub2API 账号和对应的源渠道 API Key，随后清理本地映射，不会删除目标分组。
-- 直接删除目标上游或同步分组只会清理本地记录；如需清理远端对象，应先执行“删除托管对象”。
-- 应用同步时如果源分组不存在，会将对应的远端账号设为停用，保留同步槽位。
-- 启用账号测试后，测试通过才会启用目标账号调度；失败时会保留账号并记录失败原因。
-- 倍率同步扫描会自动触发已启用同步分组重新应用。
-
 ## 充值与兑换说明
 
 充值能力取决于上游是否暴露对应接口和支付配置。
@@ -1364,7 +1317,6 @@ data: {“event”:”progress”,”message”:”...”,”step”:1,”total�
 
 - 余额同步：每 15 分钟。
 - 倍率同步：每 30 分钟。
-- Sub2API 上游同步：倍率同步完成后自动应用已启用的同步分组。
 - 订阅用量检查：随余额同步执行，对启用订阅的 Sub2API 渠道自动采集用量并触发低余量/到期告警。
 - 验证码余额刷新：随调度自动刷新，也可手动刷新。
 - 历史清理：每天凌晨执行。
@@ -1372,7 +1324,6 @@ data: {“event”:”progress”,”message”:”...”,”step”:1,”total�
 默认保留策略：
 
 - 监控日志保留 30 天。
-- 上游同步日志跟随监控日志保留天数清理。
 - 余额快照保留 90 天。
 - 通知日志保留 90 天。
 - 上游公告按”公告保留天数”清理，0 表示不清理。

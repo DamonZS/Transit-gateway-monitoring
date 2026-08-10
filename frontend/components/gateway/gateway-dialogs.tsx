@@ -714,7 +714,7 @@ export function GroupFormDialog({
             <div className="min-w-0 flex-1">
               <Label>渠道分组价格倍率重排</Label>
               <p className="text-[11px] leading-5 text-muted-foreground">
-                开启后，倍率扫描结束时按源分组实时倍率重写路由顺序与账号计费倍率（对齐上游同步账号）。
+                开启后，倍率扫描结束时按源分组实时倍率重写路由顺序与账号计费倍率。
               </p>
             </div>
             <Switch

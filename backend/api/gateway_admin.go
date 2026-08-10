@@ -3,6 +3,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -668,6 +669,39 @@ func upsertGatewayPrice(c *gin.Context, d *Deps) {
 	if strings.TrimSpace(item.ModelName) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model_name is required"})
 		return
+	}
+	item.BillingMode = strings.ToLower(strings.TrimSpace(item.BillingMode))
+	if item.BillingMode == "" {
+		item.BillingMode = string(gateway.BillingModeToken)
+	}
+	switch gateway.BillingMode(item.BillingMode) {
+	case gateway.BillingModeToken, gateway.BillingModePerRequest, gateway.BillingModeImage, gateway.BillingModeVideo:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid billing_mode"})
+		return
+	}
+	for _, price := range []float64{
+		item.InputPricePerToken, item.OutputPricePerToken, item.CacheCreationPricePerToken, item.CacheReadPricePerToken,
+		item.PerRequestPrice, item.ImagePrice1K, item.ImagePrice2K, item.ImagePrice4K,
+		item.VideoPrice480P, item.VideoPrice720P, item.VideoPrice1080P,
+	} {
+		if price < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "price must be >= 0"})
+			return
+		}
+	}
+	if strings.TrimSpace(item.PricingTiersJSON) != "" {
+		var tiers []gateway.PricingTier
+		if err := json.Unmarshal([]byte(item.PricingTiersJSON), &tiers); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pricing_tiers_json"})
+			return
+		}
+		for _, tier := range tiers {
+			if tier.PerRequestPrice < 0 || tier.MinTokens < 0 || (tier.MaxTokens != nil && *tier.MaxTokens <= tier.MinTokens) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid pricing tier"})
+				return
+			}
+		}
 	}
 	if err := d.ModelPrices.Upsert(&item); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

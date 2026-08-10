@@ -11,41 +11,45 @@ type AuthResult struct {
 
 // CreateGroupInput 创建网关分组。
 type CreateGroupInput struct {
-	Name                 string `json:"name"`
-	Description          string `json:"description"`
-	RateSortDirection    string `json:"rate_sort_direction"`
-	RateResortEnabled    *bool  `json:"rate_resort_enabled"`
-	ModelMappingJSON     string `json:"model_mapping"`
-	ModelsJSON           string `json:"models_json"`
-	ModelsMode           string `json:"models_mode"`
-	RetryEnabled         *bool  `json:"retry_enabled"`
-	RetryCount           *int   `json:"retry_count"`
-	FailoverEnabled      *bool  `json:"failover_enabled"`
-	FailoverMax          *int   `json:"failover_max"`
-	FailoverOn4xx        *bool  `json:"failover_on_4xx"`
-	CooldownSeconds      *int   `json:"cooldown_seconds"`
-	FirstTokenTimeoutSec *int   `json:"first_token_timeout_sec"`
+	Name                  string `json:"name"`
+	Description           string `json:"description"`
+	RateSortDirection     string `json:"rate_sort_direction"`
+	RateResortEnabled     *bool  `json:"rate_resort_enabled"`
+	ModelMappingJSON      string `json:"model_mapping"`
+	ModelsJSON            string `json:"models_json"`
+	ModelsMode            string `json:"models_mode"`
+	ServiceTierRulesJSON  string `json:"service_tier_rules_json"`
+	SystemPromptRulesJSON string `json:"system_prompt_rules_json"`
+	RetryEnabled          *bool  `json:"retry_enabled"`
+	RetryCount            *int   `json:"retry_count"`
+	FailoverEnabled       *bool  `json:"failover_enabled"`
+	FailoverMax           *int   `json:"failover_max"`
+	FailoverOn4xx         *bool  `json:"failover_on_4xx"`
+	CooldownSeconds       *int   `json:"cooldown_seconds"`
+	FirstTokenTimeoutSec  *int   `json:"first_token_timeout_sec"`
 	// UserAgent 组级统一 UA；路由 mode=group 时使用。
 	UserAgent string `json:"user_agent"`
 }
 
 // UpdateGroupInput 更新网关分组（指针字段：nil 表示不改）。
 type UpdateGroupInput struct {
-	Name                 *string `json:"name"`
-	Description          *string `json:"description"`
-	Status               *string `json:"status"`
-	RateSortDirection    *string `json:"rate_sort_direction"`
-	RateResortEnabled    *bool   `json:"rate_resort_enabled"`
-	ModelMappingJSON     *string `json:"model_mapping"`
-	ModelsJSON           *string `json:"models_json"`
-	ModelsMode           *string `json:"models_mode"`
-	RetryEnabled         *bool   `json:"retry_enabled"`
-	RetryCount           *int    `json:"retry_count"`
-	FailoverEnabled      *bool   `json:"failover_enabled"`
-	FailoverMax          *int    `json:"failover_max"`
-	FailoverOn4xx        *bool   `json:"failover_on_4xx"`
-	CooldownSeconds      *int    `json:"cooldown_seconds"`
-	FirstTokenTimeoutSec *int    `json:"first_token_timeout_sec"`
+	Name                  *string `json:"name"`
+	Description           *string `json:"description"`
+	Status                *string `json:"status"`
+	RateSortDirection     *string `json:"rate_sort_direction"`
+	RateResortEnabled     *bool   `json:"rate_resort_enabled"`
+	ModelMappingJSON      *string `json:"model_mapping"`
+	ModelsJSON            *string `json:"models_json"`
+	ModelsMode            *string `json:"models_mode"`
+	ServiceTierRulesJSON  *string `json:"service_tier_rules_json"`
+	SystemPromptRulesJSON *string `json:"system_prompt_rules_json"`
+	RetryEnabled          *bool   `json:"retry_enabled"`
+	RetryCount            *int    `json:"retry_count"`
+	FailoverEnabled       *bool   `json:"failover_enabled"`
+	FailoverMax           *int    `json:"failover_max"`
+	FailoverOn4xx         *bool   `json:"failover_on_4xx"`
+	CooldownSeconds       *int    `json:"cooldown_seconds"`
+	FirstTokenTimeoutSec  *int    `json:"first_token_timeout_sec"`
 	// UserAgent 空串=清除组级 UA。
 	UserAgent *string `json:"user_agent"`
 }

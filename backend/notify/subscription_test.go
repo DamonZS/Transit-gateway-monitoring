@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bejix/upstream-ops/backend/storage"
@@ -102,5 +103,24 @@ func TestParseSubscriptionsLegacyChannelID(t *testing.T) {
 	}
 	if len(list) != 1 || len(list[0].ChannelIDs) != 1 || list[0].ChannelIDs[0] != 7 {
 		t.Fatalf("legacy channel_id should migrate to ChannelIDs=[7], got %+v", list)
+	}
+}
+
+func TestRateNotificationBatchMarkdownAndSubscriptionFilter(t *testing.T) {
+	batch := RateNotificationBatch{
+		Changed: []ChannelRateChange{
+			{ChannelID: 1, ChannelName: "渠道 A", Change: RateChange{GroupName: "alpha", OldRatio: 0.04, NewRatio: 0.048}},
+			{ChannelID: 2, ChannelName: "渠道 B", Change: RateChange{GroupName: "beta", OldRatio: 1, NewRatio: 1.2}},
+		},
+		Added: []ChannelRateChange{{ChannelID: 2, ChannelName: "渠道 B", Change: RateChange{GroupName: "gamma", NewRatio: 0.5}}},
+	}
+	subs := []Subscription{{ChannelIDs: []uint{1}, Mode: SubscriptionModeGroups, Groups: []string{"alpha"}, Events: []storage.NotificationEvent{storage.EventRateChanged}}}
+	filtered := filterRateNotificationBatch(batch, subs, 0)
+	if len(filtered.Changed) != 1 || len(filtered.Added) != 0 {
+		t.Fatalf("filtered batch = %#v", filtered)
+	}
+	msg := BuildRateNotificationBatchMessage(filtered)
+	if msg.Event != storage.EventRateChanged || !strings.Contains(msg.Subject, "1 个渠道 · 1 项") || !strings.Contains(msg.Body, "# 渠道分组变动") || !strings.Contains(msg.Body, "### 渠道 A") || !strings.Contains(msg.Body, "alpha") || strings.Contains(msg.Body, "beta") {
+		t.Fatalf("message = %#v", msg)
 	}
 }
