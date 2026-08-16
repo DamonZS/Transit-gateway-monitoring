@@ -28,6 +28,7 @@ type Manager struct {
 	gatewaySvc       *gateway.Service
 	schedulerFactory SchedulerFactory
 	auth             *auth.Service
+	sso              *auth.SSOService
 	scheduler        *scheduler.Scheduler
 	proxyConfig      config.ProxyConfig
 	upstreamConfig   config.UpstreamConfig
@@ -81,6 +82,20 @@ func (m *Manager) CurrentAuth() *auth.Service {
 	return m.auth
 }
 
+func (m *Manager) CurrentSSO() *auth.SSOService {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sso
+}
+
+// SetSSO installs the service built from environment-aware startup config.
+// Subsequent config-file Apply operations replace it atomically.
+func (m *Manager) SetSSO(svc *auth.SSOService) {
+	m.mu.Lock()
+	m.sso = svc
+	m.mu.Unlock()
+}
+
 func (m *Manager) CurrentProxy() config.ProxyConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -101,9 +116,11 @@ func (m *Manager) CurrentGateway() config.GatewayConfig {
 
 func (m *Manager) AuthMiddleware() gin.HandlerFunc {
 	whitelist := map[string]struct{}{
-		"/healthz":        {},
-		"/api/version":    {},
-		"/api/auth/login": {},
+		"/healthz":               {},
+		"/api/version":           {},
+		"/api/auth/login":        {},
+		"/api/auth/sso/config":   {},
+		"/api/auth/sso/exchange": {},
 	}
 	return func(c *gin.Context) {
 		if _, ok := whitelist[c.FullPath()]; ok {
@@ -123,6 +140,21 @@ func (m *Manager) AuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// FrameAncestorsMiddleware allows only the configured Toporeduce parent to
+// embed the UI when SSO is enabled. The child performs all API calls against
+// its own origin, so no cross-origin API access is required.
+func (m *Manager) FrameAncestorsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if svc := m.CurrentSSO(); svc != nil {
+			origin := svc.PublicConfig().ParentOrigin
+			if origin != "" {
+				c.Header("Content-Security-Policy", "frame-ancestors 'self' "+origin)
+			}
+		}
+		c.Next()
+	}
+}
+
 func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 	m.mu.RLock()
 	path := m.configPath
@@ -134,12 +166,18 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 	oldScheduler := m.scheduler
 	m.mu.RUnlock()
 
-	cfg, err := config.LoadFile(path)
+	// Runtime apply must use the same environment-over-file precedence as startup.
+	// Otherwise applying an unrelated setting can silently disable env-managed auth/SSO.
+	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, err
 	}
 
 	authSvc, err := buildAuth(cfg.Auth, secret)
+	if err != nil {
+		return nil, err
+	}
+	ssoSvc, err := buildSSO(cfg.SSO, authSvc)
 	if err != nil {
 		return nil, err
 	}
@@ -177,6 +215,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 
 	m.mu.Lock()
 	m.auth = authSvc
+	m.sso = ssoSvc
 	m.scheduler = newScheduler
 	m.proxyConfig = cfg.Proxy
 	m.upstreamConfig = cfg.Upstream.WithDefaults()
@@ -187,7 +226,7 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 		oldScheduler.Stop()
 	}
 
-	sections := []string{"app", "auth", "scheduler", "notifications", "retention", "proxy", "upstream", "gateway", "pricing"}
+	sections := []string{"app", "auth", "sso", "scheduler", "notifications", "retention", "proxy", "upstream", "gateway", "pricing"}
 	if m.log != nil {
 		m.log.Info("runtime config applied",
 			"sections", sections,
@@ -197,8 +236,19 @@ func (m *Manager) ApplyFromFile() (*ApplyResult, error) {
 
 	return &ApplyResult{
 		AppliedSections: sections,
-		Message:         "app、auth、scheduler、notifications、retention、proxy、upstream、gateway 已立即生效",
+		Message:         "app、auth、sso、scheduler、notifications、retention、proxy、upstream、gateway 已立即生效",
 	}, nil
+}
+
+func buildSSO(cfg config.SSOConfig, authSvc *auth.Service) (*auth.SSOService, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	svc, err := auth.NewSSO(cfg.SharedSecret, cfg.Issuer, cfg.Audience, cfg.ParentOrigin, authSvc)
+	if err != nil {
+		return nil, fmt.Errorf("init SSO: %w", err)
+	}
+	return svc, nil
 }
 
 func buildAuth(cfg config.AuthConfig, securitySecret string) (*auth.Service, error) {

@@ -2,7 +2,10 @@ name: upstream-ops
 
 services:
   app:
-    image: ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}
+    image: ${UPSTREAM_OPS_IMAGE:-toporeduce/upstream-ops:sso}
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     command: ["-config", "/app/data/config.yaml"]
     environment:
@@ -18,6 +21,11 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:-}
+      SSO_ENABLED: ${SSO_ENABLED:-false}
+      SSO_SHARED_SECRET: ${SSO_SHARED_SECRET:-}
+      SSO_ISSUER: ${SSO_ISSUER:-toporeduce}
+      SSO_AUDIENCE: ${SSO_AUDIENCE:-upstream-ops}
+      SSO_PARENT_ORIGIN: ${SSO_PARENT_ORIGIN:-}
     ports:
       - "${HTTP_PORT:-8080}:8418"
     volumes:

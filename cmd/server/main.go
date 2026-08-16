@@ -83,6 +83,16 @@ func main() {
 		log.Warn("auth disabled — all /api/* endpoints are open; set AUTH_ENABLED=true for production exposure")
 	}
 
+	var ssoSvc *auth.SSOService
+	if cfg.SSO.Enabled {
+		ssoSvc, err = auth.NewSSO(cfg.SSO.SharedSecret, cfg.SSO.Issuer, cfg.SSO.Audience, cfg.SSO.ParentOrigin, authSvc)
+		if err != nil {
+			log.Error("init SSO failed", "err", err)
+			os.Exit(1)
+		}
+		log.Info("SSO enabled", "issuer", cfg.SSO.Issuer, "audience", cfg.SSO.Audience, "parentOrigin", cfg.SSO.ParentOrigin)
+	}
+
 	db, err := storage.Open(cfg.Database.ToStorageConfig())
 	if err != nil {
 		log.Error("open database failed", "err", err)
@@ -155,10 +165,12 @@ func main() {
 		cfg.Gateway,
 		schedulerFactory,
 	)
+	runtimeMgr.SetSSO(ssoSvc)
 
 	gin.SetMode(cfg.Server.Mode)
 	router := gin.New()
 	router.Use(gin.Recovery())
+	router.Use(runtimeMgr.FrameAncestorsMiddleware())
 	if len(cfg.Server.TrustedProxies) > 0 {
 		_ = router.SetTrustedProxies(cfg.Server.TrustedProxies)
 	}

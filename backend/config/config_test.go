@@ -53,3 +53,22 @@ func TestGatewayConfigWithDefaults(t *testing.T) {
 		t.Fatalf("models cache ttl = %d", custom.ModelsCacheTTLSeconds)
 	}
 }
+
+func TestLoadReadsSSOEnvironment(t *testing.T) {
+	t.Setenv("SSO_ENABLED", "true")
+	t.Setenv("SSO_SHARED_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("SSO_ISSUER", "toporeduce-test")
+	t.Setenv("SSO_AUDIENCE", "upstream-ops-test")
+	t.Setenv("SSO_PARENT_ORIGIN", "https://api.example.com")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.SSO.Enabled || cfg.SSO.SharedSecret != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("SSO secret config = %#v", cfg.SSO)
+	}
+	if cfg.SSO.Issuer != "toporeduce-test" || cfg.SSO.Audience != "upstream-ops-test" || cfg.SSO.ParentOrigin != "https://api.example.com" {
+		t.Fatalf("SSO public config = %#v", cfg.SSO)
+	}
+}

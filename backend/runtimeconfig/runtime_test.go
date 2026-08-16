@@ -77,3 +77,60 @@ func TestApplyFromFileUpdatesUpstreamConfig(t *testing.T) {
 		t.Fatalf("user agent = %q", conn.cfg.UserAgent)
 	}
 }
+
+func TestApplyFromFileKeepsEnvironmentManagedSSO(t *testing.T) {
+	t.Setenv("AUTH_ENABLED", "true")
+	t.Setenv("ADMIN_USERNAME", "admin")
+	t.Setenv("ADMIN_PASSWORD", "password")
+	t.Setenv("AUTH_TOKEN_SECRET", "auth-token-secret")
+	t.Setenv("SSO_ENABLED", "true")
+	t.Setenv("SSO_SHARED_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("SSO_ISSUER", "toporeduce")
+	t.Setenv("SSO_AUDIENCE", "upstream-ops")
+	t.Setenv("SSO_PARENT_ORIGIN", "https://api.example.com")
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &config.Config{
+		Scheduler: config.SchedulerConfig{
+			BalanceCron: "",
+			RateCron:    "",
+			Retention:   config.RetentionConfig{Cron: ""},
+		},
+	}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := New(
+		path,
+		"fallback-secret",
+		log,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		config.ProxyConfig{},
+		config.UpstreamConfig{},
+		config.GatewayConfig{},
+		func(scfg config.SchedulerConfig, pcfg config.ProxyConfig) *scheduler.Scheduler {
+			return scheduler.New(scfg, nil, nil, nil, nil, nil, nil, nil, nil, pcfg, log)
+		},
+	)
+
+	if _, err := mgr.ApplyFromFile(); err != nil {
+		t.Fatalf("ApplyFromFile: %v", err)
+	}
+	if mgr.CurrentAuth() == nil {
+		t.Fatal("environment-managed auth was disabled during apply")
+	}
+	sso := mgr.CurrentSSO()
+	if sso == nil {
+		t.Fatal("environment-managed SSO was disabled during apply")
+	}
+	public := sso.PublicConfig()
+	if !public.Enabled || public.Issuer != "toporeduce" || public.Audience != "upstream-ops" || public.ParentOrigin != "https://api.example.com" {
+		t.Fatalf("SSO config after apply = %#v", public)
+	}
+}

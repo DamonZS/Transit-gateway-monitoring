@@ -1,17 +1,75 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/bejix/upstream-ops/backend/auth"
 	"github.com/gin-gonic/gin"
 )
 
 func registerAuth(g *gin.RouterGroup, d *Deps) {
 	g.POST("/auth/login", func(c *gin.Context) { login(c, d) })
 	g.GET("/auth/me", func(c *gin.Context) { whoami(c, d) })
+	g.GET("/auth/sso/config", func(c *gin.Context) { getSSOConfig(c, d) })
+	g.POST("/auth/sso/exchange", func(c *gin.Context) { exchangeSSO(c, d) })
 	g.POST("/auth/logout", func(c *gin.Context) {
 		// 无状态 token，客户端丢弃即可；这个接口仅作语义存在。
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+}
+
+type ssoExchangeInput struct {
+	Assertion string `json:"assertion" binding:"required"`
+	Nonce     string `json:"nonce" binding:"required"`
+}
+
+func getSSOConfig(c *gin.Context, d *Deps) {
+	if d.Runtime == nil {
+		c.JSON(http.StatusOK, gin.H{"data": auth.SSOPublicConfig{Enabled: false}})
+		return
+	}
+	sso := d.Runtime.CurrentSSO()
+	if sso == nil {
+		c.JSON(http.StatusOK, gin.H{"data": auth.SSOPublicConfig{Enabled: false}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": sso.PublicConfig()})
+}
+
+func exchangeSSO(c *gin.Context, d *Deps) {
+	if d.Runtime == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "SSO is disabled"})
+		return
+	}
+	sso := d.Runtime.CurrentSSO()
+	if sso == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "SSO is disabled"})
+		return
+	}
+	var in ssoExchangeInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "assertion and nonce are required"})
+		return
+	}
+	token, expiresAt, username, err := sso.Exchange(in.Assertion, in.Nonce)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrSSOReplay):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, auth.ErrSSOInvalidAssertion):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "SSO exchange failed"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"token":      token,
+			"expires_at": expiresAt.Unix(),
+			"username":   username,
+		},
 	})
 }
 

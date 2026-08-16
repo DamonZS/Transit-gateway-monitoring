@@ -40,6 +40,128 @@ interface MeResponse {
   auth_disabled?: boolean
 }
 
+interface SSOPublicConfig {
+  enabled: boolean
+  parent_origin?: string
+}
+
+interface EmbeddedSSOResult {
+  login: LoginResponse
+  nonce: string
+  parentOrigin: string
+}
+
+const EMBEDDED_SSO_TIMEOUT_MS = 12_000
+
+function createSSONonce(): string {
+  const bytes = new Uint8Array(16)
+  window.crypto.getRandomValues(bytes)
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")
+}
+
+function embeddedSSOEnabled(): boolean {
+  if (window.parent === window) return false
+  return new URLSearchParams(window.location.search).get("embed") === "1"
+}
+
+async function tryEmbeddedSSO(parentSignal: AbortSignal): Promise<EmbeddedSSOResult | null> {
+  if (!embeddedSSOEnabled() || parentSignal.aborted) return null
+
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  parentSignal.addEventListener("abort", abort, { once: true })
+  const timeout = window.setTimeout(abort, EMBEDDED_SSO_TIMEOUT_MS)
+
+  try {
+    const config = await apiFetch<SSOPublicConfig>("/auth/sso/config", {
+      signal: controller.signal,
+      skipAuthErrorHandler: true,
+    })
+    if (!config.enabled || !config.parent_origin || controller.signal.aborted) return null
+
+    let parentOrigin: string
+    try {
+      parentOrigin = new URL(config.parent_origin).origin
+    } catch {
+      return null
+    }
+    if (parentOrigin !== config.parent_origin) return null
+
+    const requestedParent = new URLSearchParams(window.location.search).get("parent_origin")
+    if (requestedParent) {
+      try {
+        if (new URL(requestedParent).origin !== parentOrigin) return null
+      } catch {
+        return null
+      }
+    }
+
+    const nonce = createSSONonce()
+    return await new Promise<EmbeddedSSOResult | null>((resolve) => {
+      let settled = false
+      let exchanging = false
+
+      const finish = (result: EmbeddedSSOResult | null) => {
+        if (settled) return
+        settled = true
+        window.removeEventListener("message", onMessage)
+        controller.signal.removeEventListener("abort", onAbort)
+        resolve(result)
+      }
+      const onAbort = () => finish(null)
+      const onMessage = async (event: MessageEvent) => {
+        if (exchanging || event.source !== window.parent || event.origin !== parentOrigin) return
+        if (!event.data || typeof event.data !== "object") return
+        const message = event.data as {
+          type?: unknown
+          payload?: { nonce?: unknown; assertion?: unknown }
+        }
+        if (
+          message.type === "toporeduce:sso-unavailable" &&
+          message.payload?.nonce === nonce
+        ) {
+          finish(null)
+          return
+        }
+        if (message.type !== "toporeduce:sso-assertion") return
+        if (message.payload?.nonce !== nonce || typeof message.payload.assertion !== "string") return
+
+        exchanging = true
+        try {
+          const login = await apiFetch<LoginResponse>("/auth/sso/exchange", {
+            method: "POST",
+            body: JSON.stringify({ assertion: message.payload.assertion, nonce }),
+            signal: controller.signal,
+            skipAuthErrorHandler: true,
+          })
+          if (!login.token) throw new Error("SSO exchange returned no token")
+          finish({ login, nonce, parentOrigin })
+        } catch {
+          if (!controller.signal.aborted) {
+            window.parent.postMessage(
+              { type: "upstream-ops:sso-error", payload: { nonce } },
+              parentOrigin,
+            )
+          }
+          finish(null)
+        }
+      }
+
+      controller.signal.addEventListener("abort", onAbort, { once: true })
+      window.addEventListener("message", onMessage)
+      window.parent.postMessage(
+        { type: "upstream-ops:sso-ready", payload: { nonce } },
+        parentOrigin,
+      )
+    })
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(timeout)
+    parentSignal.removeEventListener("abort", abort)
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   // 启动时无论有没有 token 都先 /auth/me 探测一次，因为后端可能开了"无鉴权模式"。
   const [status, setStatus] = useState<AuthStatus>("loading")
@@ -48,8 +170,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
-    apiFetch<MeResponse>("/auth/me", { skipAuthErrorHandler: true })
-      .then((me) => {
+    const controller = new AbortController()
+
+    const bootstrap = async () => {
+      try {
+        const me = await apiFetch<MeResponse>("/auth/me", {
+          signal: controller.signal,
+          skipAuthErrorHandler: true,
+        })
         if (cancelled) return
         if (me.auth_disabled) {
           // 后端关了鉴权：清掉本地任何遗留 token，避免下次开启时困惑
@@ -62,16 +190,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // 后端开启鉴权：me 成功说明现有 token 仍有效
         setUsername(me.username)
         setStatus("authenticated")
-      })
-      .catch(() => {
+      } catch {
         if (cancelled) return
-        // me 失败：本地 token（如果有）已失效；显示登录页
+        // me 失败：清理无效 token，再尝试仅用于嵌入页的 Toporeduce SSO。
         setToken(null)
+        const sso = await tryEmbeddedSSO(controller.signal)
+        if (cancelled) return
+        if (sso?.login.token) {
+          setToken(sso.login.token)
+          setAuthDisabled(false)
+          setUsername(sso.login.username)
+          setStatus("authenticated")
+          window.parent.postMessage(
+            { type: "upstream-ops:sso-complete", payload: { nonce: sso.nonce } },
+            sso.parentOrigin,
+          )
+          return
+        }
         setUsername(null)
         setStatus("anonymous")
-      })
+      }
+    }
+
+    void bootstrap()
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [])
 

@@ -59,6 +59,13 @@ func (s *Service) Login(username, password string) (string, time.Time, error) {
 		subtle.ConstantTimeCompare([]byte(password), []byte(s.password)) != 1 {
 		return "", time.Time{}, errors.New("invalid username or password")
 	}
+	return s.IssueToken()
+}
+
+// IssueToken signs the normal UpstreamOps administrator token without checking
+// a password. Only already-authenticated flows such as the trusted SSO exchange
+// should call this method.
+func (s *Service) IssueToken() (string, time.Time, error) {
 	expiresAt := time.Now().Add(s.tokenTTL)
 	c := claims{Sub: s.username, Exp: expiresAt.Unix()}
 	tok, err := s.sign(c)
@@ -128,9 +135,11 @@ func (s *Service) TokenTTL() time.Duration { return s.tokenTTL }
 //   - "/api/auth/login"
 func (s *Service) Middleware() gin.HandlerFunc {
 	whitelist := map[string]struct{}{
-		"/healthz":        {},
-		"/api/version":    {},
-		"/api/auth/login": {},
+		"/healthz":               {},
+		"/api/version":           {},
+		"/api/auth/login":        {},
+		"/api/auth/sso/config":   {},
+		"/api/auth/sso/exchange": {},
 	}
 	return func(c *gin.Context) {
 		if _, ok := whitelist[c.FullPath()]; ok {

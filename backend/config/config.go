@@ -19,6 +19,7 @@ type Config struct {
 	Database      DatabaseConfig      `mapstructure:"database" yaml:"database" json:"database"`
 	Security      SecurityConfig      `mapstructure:"security" yaml:"security" json:"security"`
 	Auth          AuthConfig          `mapstructure:"auth" yaml:"auth" json:"auth"`
+	SSO           SSOConfig           `mapstructure:"sso" yaml:"sso" json:"sso"`
 	Scheduler     SchedulerConfig     `mapstructure:"scheduler" yaml:"scheduler" json:"scheduler"`
 	Notifications NotificationsConfig `mapstructure:"notifications" yaml:"notifications" json:"notifications"`
 	Proxy         ProxyConfig         `mapstructure:"proxy" yaml:"proxy" json:"proxy"`
@@ -84,6 +85,17 @@ type AuthConfig struct {
 	Password        string `mapstructure:"password" yaml:"password" json:"password"`
 	TokenSecret     string `mapstructure:"tokenSecret" yaml:"tokenSecret" json:"tokenSecret"`
 	SessionTTLHours int    `mapstructure:"sessionTTLHours" yaml:"sessionTTLHours" json:"sessionTTLHours"`
+}
+
+// SSOConfig configures trusted, short-lived assertions issued by Toporeduce.
+// SharedSecret is only used server-side and must never be returned by a public
+// metadata endpoint.
+type SSOConfig struct {
+	Enabled      bool   `mapstructure:"enabled" yaml:"enabled" json:"enabled"`
+	SharedSecret string `mapstructure:"sharedSecret" yaml:"sharedSecret" json:"sharedSecret"`
+	Issuer       string `mapstructure:"issuer" yaml:"issuer" json:"issuer"`
+	Audience     string `mapstructure:"audience" yaml:"audience" json:"audience"`
+	ParentOrigin string `mapstructure:"parentOrigin" yaml:"parentOrigin" json:"parentOrigin"`
 }
 
 type SchedulerConfig struct {
@@ -359,6 +371,11 @@ func load(path string, withEnv bool) (*Config, string, error) {
 		_ = v.BindEnv("auth.username", "ADMIN_USERNAME")
 		_ = v.BindEnv("auth.password", "ADMIN_PASSWORD")
 		_ = v.BindEnv("auth.tokenSecret", "AUTH_TOKEN_SECRET")
+		_ = v.BindEnv("sso.enabled", "SSO_ENABLED")
+		_ = v.BindEnv("sso.sharedSecret", "SSO_SHARED_SECRET")
+		_ = v.BindEnv("sso.issuer", "SSO_ISSUER")
+		_ = v.BindEnv("sso.audience", "SSO_AUDIENCE")
+		_ = v.BindEnv("sso.parentOrigin", "SSO_PARENT_ORIGIN")
 		// Viper 坑：AutomaticEnv 只对已通过 SetDefault / BindEnv / 配置文件注册过的 key 生效；
 		// 数据库的 user/password 没有合理的默认值（拒绝写"change-me"作默认），
 		// 因此显式 BindEnv 以确保从环境变量读取。
@@ -471,6 +488,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.username", "admin")
 	v.SetDefault("auth.sessionTTLHours", 168) // 7 天
+	v.SetDefault("sso.enabled", false)
+	v.SetDefault("sso.issuer", "toporeduce")
+	v.SetDefault("sso.audience", "upstream-ops")
 
 	// 通知去抖：不过滤涨跌幅、balance_low 1h 内不重复、失败重试 3 次。
 	// 全渠道倍率变化始终在一次扫描结束后合并发送。
