@@ -128,7 +128,8 @@ func (m *Manager) AuthMiddleware() gin.HandlerFunc {
 		"/api/auth/login":        {},
 		"/api/auth/sso/config":   {},
 		"/api/auth/sso/exchange": {},
-		"/api/integrations/toporeduce/channels/sync": {},
+		"/api/integrations/toporeduce/channels/sync":    {},
+		"/api/integrations/toporeduce/channels/metrics": {},
 	}
 	return func(c *gin.Context) {
 		if _, ok := whitelist[c.FullPath()]; ok {

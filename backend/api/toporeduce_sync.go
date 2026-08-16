@@ -52,12 +52,13 @@ func registerToporeduceIntegration(g *gin.RouterGroup, d *Deps) {
 	g.POST("/integrations/toporeduce/channels/sync", func(c *gin.Context) {
 		syncToporeduceChannels(c, d)
 	})
+	g.GET("/integrations/toporeduce/channels/metrics", func(c *gin.Context) {
+		getToporeduceChannelMetrics(c, d)
+	})
 }
 
 func syncToporeduceChannels(c *gin.Context, d *Deps) {
-	secret, ok := bearerCredential(c.GetHeader("Authorization"))
-	if !ok || d == nil || d.Runtime == nil || !d.Runtime.VerifySSOSharedSecret(secret) {
-		fail(c, http.StatusUnauthorized, errors.New("invalid Toporeduce integration credential"))
+	if !authorizeToporeduceIntegration(c, d) {
 		return
 	}
 
@@ -80,6 +81,15 @@ func syncToporeduceChannels(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": summary})
+}
+
+func authorizeToporeduceIntegration(c *gin.Context, d *Deps) bool {
+	secret, ok := bearerCredential(c.GetHeader("Authorization"))
+	if !ok || d == nil || d.Runtime == nil || !d.Runtime.VerifySSOSharedSecret(secret) {
+		fail(c, http.StatusUnauthorized, errors.New("invalid Toporeduce integration credential"))
+		return false
+	}
+	return true
 }
 
 func applyToporeduceChannelSnapshot(d *Deps, request toporeduceChannelSyncRequest) (toporeduceChannelSyncSummary, error) {

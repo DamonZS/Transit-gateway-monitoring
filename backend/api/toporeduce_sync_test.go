@@ -595,12 +595,14 @@ func newToporeduceSyncTestServer(t *testing.T) (*gin.Engine, *Deps) {
 	channels := storage.NewChannels(db)
 	sessions := storage.NewAuthSessions(db)
 	rates := storage.NewRates(db)
+	monitorLogs := storage.NewMonitorLogs(db)
+	gatewayUsage := storage.NewGatewayUsageLogs(db)
 	channelSvc := channel.NewService(
 		channels,
 		sessions,
 		storage.NewCaptchas(db),
 		rates,
-		storage.NewMonitorLogs(db),
+		monitorLogs,
 		cipher,
 	)
 	adminAuth, err := auth.New("admin", "password", "admin-token-secret", time.Hour)
@@ -619,13 +621,15 @@ func newToporeduceSyncTestServer(t *testing.T) (*gin.Engine, *Deps) {
 	)
 	runtime.SetSSO(sso)
 	deps := &Deps{
-		DB:         db,
-		Cipher:     cipher,
-		Runtime:    runtime,
-		Channels:   channels,
-		Sessions:   sessions,
-		Rates:      rates,
-		ChannelSvc: channelSvc,
+		DB:           db,
+		Cipher:       cipher,
+		Runtime:      runtime,
+		Channels:     channels,
+		Sessions:     sessions,
+		Rates:        rates,
+		MonLogs:      monitorLogs,
+		ChannelSvc:   channelSvc,
+		GatewayUsage: gatewayUsage,
 	}
 	router := gin.New()
 	Register(router, deps)

@@ -156,6 +156,22 @@ func (r *Rates) BalanceHistory(channelID uint, limit int) ([]BalanceSnapshot, er
 	return list, nil
 }
 
+// CostHistory 倒序拉取消费历史。
+func (r *Rates) CostHistory(channelID uint, limit int) ([]CostSnapshot, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	var list []CostSnapshot
+	if err := r.db.
+		Where("channel_id = ?", channelID).
+		Order("sampled_at DESC").
+		Limit(limit).
+		Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
 // DailyAggregate 一天的聚合余额（所有渠道之和）。
 type DailyAggregate struct {
 	Day     time.Time `json:"day"`

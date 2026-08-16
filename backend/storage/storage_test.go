@@ -379,6 +379,38 @@ func TestDeleteCostSnapshotsBefore(t *testing.T) {
 	}
 }
 
+func TestCostHistoryFiltersChannelAndReturnsNewestFirst(t *testing.T) {
+	db := openTestDB(t)
+	rates := NewRates(db)
+	type costHistoryReader interface {
+		CostHistory(channelID uint, limit int) ([]CostSnapshot, error)
+	}
+	reader, ok := any(rates).(costHistoryReader)
+	if !ok {
+		t.Fatal("Rates must implement CostHistory")
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, snapshot := range []CostSnapshot{
+		{ChannelID: 1, TodayCost: 1, SampledAt: now.Add(-2 * time.Hour)},
+		{ChannelID: 2, TodayCost: 99, SampledAt: now.Add(-time.Hour)},
+		{ChannelID: 1, TodayCost: 2, SampledAt: now},
+	} {
+		item := snapshot
+		if err := rates.AppendCost(&item); err != nil {
+			t.Fatalf("append cost snapshot: %v", err)
+		}
+	}
+
+	history, err := reader.CostHistory(1, 2)
+	if err != nil {
+		t.Fatalf("cost history: %v", err)
+	}
+	if len(history) != 2 || history[0].TodayCost != 2 || history[1].TodayCost != 1 {
+		t.Fatalf("history = %#v", history)
+	}
+}
+
 func TestTryClaimCooldown(t *testing.T) {
 	db := openTestDB(t)
 	notifications := NewNotifications(db)
