@@ -56,6 +56,26 @@ func (r *Channels) FindByID(id uint) (*Channel, error) {
 	}
 	return &c, nil
 }
+
+func (r *Channels) FindManaged(source, externalID string) (*Channel, error) {
+	var c Channel
+	err := r.db.Where("managed_source = ? AND managed_external_id = ?", source, externalID).First(&c).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (r *Channels) ListManaged(source string) ([]Channel, error) {
+	var list []Channel
+	if err := r.db.Where("managed_source = ?", source).Order("id ASC").Find(&list).Error; err != nil {
+		return nil, err
+	}
+	return list, nil
+}
 func (r *Channels) List() ([]Channel, error) {
 	var list []Channel
 	if err := r.db.Order("sort_order DESC").Order("id ASC").Find(&list).Error; err != nil {

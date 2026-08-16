@@ -39,6 +39,9 @@ const (
 type Channel struct {
 	ID                     uint           `gorm:"primaryKey" json:"id"`
 	Name                   string         `gorm:"size:128;not null;uniqueIndex" json:"name"`
+	ManagedSource          *string        `gorm:"size:32;uniqueIndex:idx_channel_managed_external,priority:1" json:"managed_source,omitempty"`
+	ManagedExternalID      *string        `gorm:"size:256;uniqueIndex:idx_channel_managed_external,priority:2" json:"managed_external_id,omitempty"`
+	ManagedLocalChannelIDs []int          `gorm:"serializer:json;type:text" json:"managed_local_channel_ids,omitempty"`
 	Type                   ChannelType    `gorm:"size:32;not null;index" json:"type"`
 	SiteURL                string         `gorm:"size:512;not null" json:"site_url"`
 	Username               string         `gorm:"size:256;not null" json:"username"`

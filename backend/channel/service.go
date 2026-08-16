@@ -146,24 +146,27 @@ type Sub2APITokenCredential struct {
 //   - password: Password 必填；Username 为登录账号
 //   - token:    TokenCredential 必填（已序列化为 JSON 字符串）；Username 仅作展示备注
 type CreateInput struct {
-	Name                   string
-	Type                   storage.ChannelType
-	SiteURL                string
-	Username               string
-	SortOrder              int
-	Password               string
-	CredentialMode         storage.CredentialMode
-	TokenCredential        string // JSON：password 模式时为空
-	LoginExtraParams       string
-	TurnstileEnabled       bool
-	IgnoreAnnouncements    bool
-	SubscriptionEnabled    bool
-	ProxyEnabled           bool
-	CaptchaConfigID        *uint
-	BalanceThreshold       float64
-	RechargeMultiplier     *float64
-	RechargeMultiplierMode string
-	MonitorEnabled         bool
+	Name                        string
+	ManagedSource               string
+	ManagedExternalID           string
+	ManagedLocalChannelIDs      []int
+	Type                        storage.ChannelType
+	SiteURL                     string
+	Username                    string
+	SortOrder                   int
+	Password                    string
+	CredentialMode              storage.CredentialMode
+	TokenCredential             string // JSON：password 模式时为空
+	LoginExtraParams            string
+	TurnstileEnabled            bool
+	IgnoreAnnouncements         bool
+	SubscriptionEnabled         bool
+	ProxyEnabled                bool
+	CaptchaConfigID             *uint
+	BalanceThreshold            float64
+	RechargeMultiplier          *float64
+	RechargeMultiplierMode      string
+	MonitorEnabled              bool
 	OnlyCreatedKeyGroupsEnabled bool
 }
 
@@ -188,24 +191,34 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encrypt credential: %w", err)
 	}
+	var managedSource, managedExternalID *string
+	if source := strings.TrimSpace(in.ManagedSource); source != "" {
+		managedSource = &source
+	}
+	if externalID := strings.TrimSpace(in.ManagedExternalID); externalID != "" {
+		managedExternalID = &externalID
+	}
 	c := &storage.Channel{
-		Name:                   in.Name,
-		Type:                   in.Type,
-		SiteURL:                in.SiteURL,
-		Username:               in.Username,
-		SortOrder:              normalizeSortOrder(in.SortOrder),
-		PasswordCipher:         enc,
-		CredentialMode:         mode,
-		LoginExtraParams:       loginExtraParams,
-		TurnstileEnabled:       in.TurnstileEnabled && mode == storage.CredentialModePassword, // token 模式不需要打码
-		IgnoreAnnouncements:    in.IgnoreAnnouncements,
-		SubscriptionEnabled:    in.SubscriptionEnabled,
-		ProxyEnabled:           in.ProxyEnabled,
-		CaptchaConfigID:        in.CaptchaConfigID,
-		BalanceThreshold:       in.BalanceThreshold,
-		RechargeMultiplier:     normalizeRechargeMultiplier(in.RechargeMultiplier),
-		RechargeMultiplierMode: connector.NormalizeRechargeMultiplierMode(in.RechargeMultiplierMode),
-		MonitorEnabled:         in.MonitorEnabled,
+		Name:                        in.Name,
+		ManagedSource:               managedSource,
+		ManagedExternalID:           managedExternalID,
+		ManagedLocalChannelIDs:      append([]int(nil), in.ManagedLocalChannelIDs...),
+		Type:                        in.Type,
+		SiteURL:                     in.SiteURL,
+		Username:                    in.Username,
+		SortOrder:                   normalizeSortOrder(in.SortOrder),
+		PasswordCipher:              enc,
+		CredentialMode:              mode,
+		LoginExtraParams:            loginExtraParams,
+		TurnstileEnabled:            in.TurnstileEnabled && mode == storage.CredentialModePassword, // token 模式不需要打码
+		IgnoreAnnouncements:         in.IgnoreAnnouncements,
+		SubscriptionEnabled:         in.SubscriptionEnabled,
+		ProxyEnabled:                in.ProxyEnabled,
+		CaptchaConfigID:             in.CaptchaConfigID,
+		BalanceThreshold:            in.BalanceThreshold,
+		RechargeMultiplier:          normalizeRechargeMultiplier(in.RechargeMultiplier),
+		RechargeMultiplierMode:      connector.NormalizeRechargeMultiplierMode(in.RechargeMultiplierMode),
+		MonitorEnabled:              in.MonitorEnabled,
 		OnlyCreatedKeyGroupsEnabled: in.OnlyCreatedKeyGroupsEnabled,
 	}
 	if mode == storage.CredentialModeToken {
@@ -220,23 +233,25 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 
 // UpdateInput 编辑渠道的可选字段。Password / TokenCredential 为空表示不修改凭据。
 type UpdateInput struct {
-	Name                   *string
-	SiteURL                *string
-	Username               *string
-	SortOrder              *int
-	Password               *string
-	CredentialMode         *storage.CredentialMode
-	TokenCredential        *string // JSON
-	LoginExtraParams       *string
-	TurnstileEnabled       *bool
-	IgnoreAnnouncements    *bool
-	SubscriptionEnabled    *bool
-	ProxyEnabled           *bool
-	CaptchaConfigID        *uint
-	BalanceThreshold       *float64
-	RechargeMultiplier     *float64
-	RechargeMultiplierMode *string
-	MonitorEnabled         *bool
+	Name                        *string
+	Type                        *storage.ChannelType
+	ManagedLocalChannelIDs      *[]int
+	SiteURL                     *string
+	Username                    *string
+	SortOrder                   *int
+	Password                    *string
+	CredentialMode              *storage.CredentialMode
+	TokenCredential             *string // JSON
+	LoginExtraParams            *string
+	TurnstileEnabled            *bool
+	IgnoreAnnouncements         *bool
+	SubscriptionEnabled         *bool
+	ProxyEnabled                *bool
+	CaptchaConfigID             *uint
+	BalanceThreshold            *float64
+	RechargeMultiplier          *float64
+	RechargeMultiplierMode      *string
+	MonitorEnabled              *bool
 	OnlyCreatedKeyGroupsEnabled *bool
 }
 
@@ -245,13 +260,23 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateSession := false
 	if in.Name != nil {
 		c.Name = *in.Name
 	}
+	if in.Type != nil {
+		invalidateSession = invalidateSession || c.Type != *in.Type
+		c.Type = *in.Type
+	}
+	if in.ManagedLocalChannelIDs != nil {
+		c.ManagedLocalChannelIDs = append([]int(nil), (*in.ManagedLocalChannelIDs)...)
+	}
 	if in.SiteURL != nil {
+		invalidateSession = invalidateSession || c.SiteURL != *in.SiteURL
 		c.SiteURL = *in.SiteURL
 	}
 	if in.Username != nil {
+		invalidateSession = invalidateSession || c.Username != *in.Username
 		c.Username = *in.Username
 	}
 	if in.SortOrder != nil {
@@ -298,8 +323,7 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 		}
 		c.PasswordCipher = enc
 		c.CredentialMode = finalMode
-		// 凭据或模式变了，强制下次重新构造 session
-		_ = s.AuthSessions.Delete(c.ID)
+		invalidateSession = true
 	} else if modeChanged {
 		// 理论上面已挡住，这里兜底
 		return nil, errors.New("凭据模式变更必须同时提供新凭据")
@@ -311,7 +335,7 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 		}
 		if loginExtraParams != c.LoginExtraParams {
 			c.LoginExtraParams = loginExtraParams
-			_ = s.AuthSessions.Delete(c.ID)
+			invalidateSession = true
 		}
 	}
 
@@ -354,6 +378,11 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	}
 	if err := s.Channels.Update(c); err != nil {
 		return nil, err
+	}
+	if invalidateSession {
+		// Login identity or credentials changed; the old upstream session is no
+		// longer valid for this channel.
+		_ = s.AuthSessions.Delete(c.ID)
 	}
 	return c, nil
 }

@@ -96,6 +96,13 @@ func (m *Manager) SetSSO(svc *auth.SSOService) {
 	m.mu.Unlock()
 }
 
+// VerifySSOSharedSecret uses the currently active, environment-aware SSO
+// configuration so runtime config reloads also apply to integrations.
+func (m *Manager) VerifySSOSharedSecret(candidate string) bool {
+	svc := m.CurrentSSO()
+	return svc != nil && svc.VerifySharedSecret(candidate)
+}
+
 func (m *Manager) CurrentProxy() config.ProxyConfig {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -121,6 +128,7 @@ func (m *Manager) AuthMiddleware() gin.HandlerFunc {
 		"/api/auth/login":        {},
 		"/api/auth/sso/config":   {},
 		"/api/auth/sso/exchange": {},
+		"/api/integrations/toporeduce/channels/sync": {},
 	}
 	return func(c *gin.Context) {
 		if _, ok := whitelist[c.FullPath()]; ok {

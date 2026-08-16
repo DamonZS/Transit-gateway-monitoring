@@ -106,6 +106,7 @@ func Register(r *gin.Engine, d *Deps) {
 	{
 		registerVersion(api, d)
 		registerAuth(api, d)
+		registerToporeduceIntegration(api, d)
 		registerChannels(api, d)
 		registerCaptchas(api, d)
 		registerNotifications(api, d)

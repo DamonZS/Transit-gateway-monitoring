@@ -145,6 +145,15 @@ func (s *SSOService) PublicConfig() SSOPublicConfig {
 	}
 }
 
+// VerifySharedSecret validates a server-to-server integration credential
+// against the same secret used to trust Toporeduce SSO assertions.
+func (s *SSOService) VerifySharedSecret(candidate string) bool {
+	if s == nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(s.sharedSecret, []byte(candidate)) == 1
+}
+
 // Exchange verifies a signed assertion and returns a regular UpstreamOps
 // administrator token. expectedNonce must be generated and retained by the
 // embedding client; it is compared to the signed nonce before the JTI is used.
