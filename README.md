@@ -269,7 +269,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-a-strong-password
 ```
 
-Docker pulls `ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}` by default. Configuration and data are stored in the host `data/` directory.
+Docker pulls `ghcr.io/damonzs/transit-gateway-monitoring:edge` by default. Configuration and data are stored in the host `data/` directory.
 
 Start:
 
@@ -293,16 +293,16 @@ The host file is `data/upstream-ops.db`. Runtime system settings are persisted t
 
 ### Pin the Image Version
 
-The default image tag comes from `.env`:
+The image reference comes from `.env`:
 
 ```env
-IMAGE_TAG=latest
+UPSTREAM_OPS_IMAGE=ghcr.io/damonzs/transit-gateway-monitoring:edge
 ```
 
 For production, pin a specific version:
 
 ```env
-IMAGE_TAG=v0.0.9
+UPSTREAM_OPS_IMAGE=ghcr.io/damonzs/transit-gateway-monitoring:v0.0.9
 ```
 
 ## MySQL Deployment
@@ -330,13 +330,13 @@ MYSQL_PORT=33069
 
 ```env
 HTTP_PORT=8080
-IMAGE_TAG=latest
+UPSTREAM_OPS_IMAGE=ghcr.io/damonzs/transit-gateway-monitoring:edge
 SERVER_MODE=release
 LOG_LEVEL=info
 ```
 
 - `HTTP_PORT`: host port.
-- `IMAGE_TAG`: Docker image tag.
+- `UPSTREAM_OPS_IMAGE`: full Docker image reference, optionally pinned to a tag or digest.
 - `SERVER_MODE`: Gin mode, usually `release`.
 - `LOG_LEVEL`: log level.
 

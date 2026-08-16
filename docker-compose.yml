@@ -2,7 +2,7 @@ name: upstream-ops
 
 services:
   app:
-    image: ${UPSTREAM_OPS_IMAGE:-toporeduce/upstream-ops:sso}
+    image: ${UPSTREAM_OPS_IMAGE:-ghcr.io/damonzs/transit-gateway-monitoring:edge}
     build:
       context: .
       dockerfile: Dockerfile

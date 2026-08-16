@@ -283,7 +283,7 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=请替换为强密码
 ```
 
-Docker 默认拉取 `ghcr.io/bejix/upstream-ops:${IMAGE_TAG:-latest}`，不会在本机编译镜像。配置和数据都会写入宿主机项目目录下的 `data/`。
+Docker 默认拉取 `ghcr.io/damonzs/transit-gateway-monitoring:edge`，不会在本机编译镜像。配置和数据都会写入宿主机项目目录下的 `data/`。
 
 启动：
 
@@ -307,16 +307,16 @@ http://localhost:8080
 
 ### 固定镜像版本
 
-默认镜像 Tag 来自 `.env`：
+镜像地址来自 `.env`：
 
 ```env
-IMAGE_TAG=latest
+UPSTREAM_OPS_IMAGE=ghcr.io/damonzs/transit-gateway-monitoring:edge
 ```
 
 生产环境建议锁定具体版本，例如：
 
 ```env
-IMAGE_TAG=v0.0.9
+UPSTREAM_OPS_IMAGE=ghcr.io/damonzs/transit-gateway-monitoring:v0.0.9
 ```
 
 ## MySQL 部署
@@ -344,13 +344,13 @@ MYSQL_PORT=33069
 
 ```env
 HTTP_PORT=8080
-IMAGE_TAG=latest
+UPSTREAM_OPS_IMAGE=ghcr.io/damonzs/transit-gateway-monitoring:edge
 SERVER_MODE=release
 LOG_LEVEL=info
 ```
 
 - `HTTP_PORT`：宿主机暴露端口。
-- `IMAGE_TAG`：镜像版本。
+- `UPSTREAM_OPS_IMAGE`：完整镜像地址，可固定到 Tag 或 digest。
 - `SERVER_MODE`：Gin 运行模式，通常为 `release`。
 - `LOG_LEVEL`：日志等级。
 

@@ -30,6 +30,8 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +72,7 @@ jobs:
       # 多架构构建 + 推送。GitHub Actions 内置 cache (type=gha) 把
       # 前端 pnpm install 和后端 go mod download 都缓存住，二次构建 1-2 分钟。
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -88,3 +91,139 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          printf 'Digest: `%s`\n' '${{ steps.build.outputs.digest }}' >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-production:
+    name: Deploy production
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: transit-gateway-monitoring-production
+      cancel-in-progress: false
+    env:
+      PROD_HOST: ${{ vars.PROD_HOST }}
+      PROD_SSH_PORT: ${{ vars.PROD_SSH_PORT }}
+      PROD_SSH_USER: ${{ vars.PROD_SSH_USER }}
+      PROD_DEPLOY_DIR: ${{ vars.PROD_DEPLOY_DIR }}
+      PROD_HTTP_BIND: ${{ vars.PROD_HTTP_BIND }}
+      PROD_HTTP_PORT: ${{ vars.PROD_HTTP_PORT }}
+      PROD_DOCKER_NETWORK: ${{ vars.PROD_DOCKER_NETWORK }}
+      ADMIN_USERNAME: ${{ vars.ADMIN_USERNAME }}
+      SSO_ISSUER: ${{ vars.SSO_ISSUER }}
+      SSO_AUDIENCE: ${{ vars.SSO_AUDIENCE }}
+      SSO_PARENT_ORIGIN: ${{ vars.SSO_PARENT_ORIGIN }}
+      PROD_SSH_PRIVATE_KEY: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+      PROD_SSH_KNOWN_HOSTS: ${{ secrets.PROD_SSH_KNOWN_HOSTS }}
+      APP_SECRET: ${{ secrets.APP_SECRET }}
+      ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+      AUTH_TOKEN_SECRET: ${{ secrets.AUTH_TOKEN_SECRET }}
+      SSO_SHARED_SECRET: ${{ secrets.SSO_SHARED_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            PROD_HOST PROD_SSH_PORT PROD_SSH_USER PROD_DEPLOY_DIR
+            PROD_HTTP_BIND PROD_HTTP_PORT PROD_DOCKER_NETWORK
+            ADMIN_USERNAME SSO_ISSUER SSO_AUDIENCE SSO_PARENT_ORIGIN
+            PROD_SSH_PRIVATE_KEY PROD_SSH_KNOWN_HOSTS APP_SECRET
+            ADMIN_PASSWORD AUTH_TOKEN_SECRET SSO_SHARED_SECRET
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing deployment setting: $name" >&2
+              exit 1
+            fi
+          done
+          bash deploy/validate-production-secrets.sh
+          if [[ "${{ needs.build-and-push.outputs.digest }}" != sha256:* ]]; then
+            echo "Build did not return an immutable image digest" >&2
+            exit 1
+          fi
+
+      - name: Skip superseded revision
+        id: revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest=$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main | awk '{print $1}')
+          if [[ "$latest" != "$GITHUB_SHA" ]]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "A newer main revision exists; skipping deployment of $GITHUB_SHA"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure SSH
+        if: steps.revision.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$PROD_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$PROD_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+
+      - name: Prepare deployment payload
+        if: steps.revision.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          repository_lower=${GITHUB_REPOSITORY,,}
+          UPSTREAM_OPS_IMAGE="ghcr.io/$repository_lower@${{ needs.build-and-push.outputs.digest }}"
+          payload="$RUNNER_TEMP/upstream-ops-$GITHUB_SHA"
+          install -d -m 700 "$payload"
+          cp docker-compose.production.yml "$payload/docker-compose.production.yml"
+          cp deploy/production-deploy.sh "$payload/production-deploy.sh"
+          cat > "$payload/.env" <<EOF
+          UPSTREAM_OPS_IMAGE=$UPSTREAM_OPS_IMAGE
+          HTTP_BIND=$PROD_HTTP_BIND
+          HTTP_PORT=$PROD_HTTP_PORT
+          TOPOREDUCE_NETWORK=$PROD_DOCKER_NETWORK
+          TZ=Asia/Shanghai
+          SERVER_MODE=release
+          LOG_LEVEL=info
+          APP_SECRET=$APP_SECRET
+          AUTH_ENABLED=true
+          ADMIN_USERNAME=$ADMIN_USERNAME
+          ADMIN_PASSWORD=$ADMIN_PASSWORD
+          AUTH_TOKEN_SECRET=$AUTH_TOKEN_SECRET
+          SSO_ENABLED=true
+          SSO_SHARED_SECRET=$SSO_SHARED_SECRET
+          SSO_ISSUER=$SSO_ISSUER
+          SSO_AUDIENCE=$SSO_AUDIENCE
+          SSO_PARENT_ORIGIN=$SSO_PARENT_ORIGIN
+          EOF
+          chmod 600 "$payload/.env"
+
+      - name: Upload and deploy
+        if: steps.revision.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh_target="$PROD_SSH_USER@$PROD_HOST"
+          ssh_args=(-p "$PROD_SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          remote_incoming="$PROD_DEPLOY_DIR/.incoming/$GITHUB_SHA"
+          ssh "${ssh_args[@]}" "$ssh_target" "install -d -m 700 '$remote_incoming'"
+          scp -P "$PROD_SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/upstream-ops-$GITHUB_SHA/docker-compose.production.yml" \
+            "$RUNNER_TEMP/upstream-ops-$GITHUB_SHA/production-deploy.sh" \
+            "$RUNNER_TEMP/upstream-ops-$GITHUB_SHA/.env" \
+            "$ssh_target:$remote_incoming/"
+          ssh "${ssh_args[@]}" "$ssh_target" \
+            "chmod 700 '$remote_incoming/production-deploy.sh' && '$remote_incoming/production-deploy.sh' '$PROD_DEPLOY_DIR' '$GITHUB_SHA'"
+
+      - name: Deployment summary
+        if: steps.revision.outputs.deploy == 'true'
+        run: |
+          repository_lower=${GITHUB_REPOSITORY,,}
+          echo "### Production deployment" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Revision: `%s`\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Image: `ghcr.io/%s@%s`\n' "$repository_lower" '${{ needs.build-and-push.outputs.digest }}' >> "$GITHUB_STEP_SUMMARY"

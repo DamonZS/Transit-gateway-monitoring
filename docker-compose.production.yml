@@ -1,0 +1,45 @@
+name: upstream-ops
+
+services:
+  app:
+    image: ${UPSTREAM_OPS_IMAGE:?UPSTREAM_OPS_IMAGE is required}
+    container_name: upstream-ops
+    restart: unless-stopped
+    command: ["-config", "/app/data/config.yaml"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SERVER_PORT: 8418
+      DATABASE_DRIVER: sqlite
+      DATABASE_PATH: /app/data/upstream-ops.db
+      SERVER_MODE: ${SERVER_MODE:-release}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
+      AUTH_ENABLED: ${AUTH_ENABLED:-true}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}
+      AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:?AUTH_TOKEN_SECRET is required}
+      SSO_ENABLED: ${SSO_ENABLED:-true}
+      SSO_SHARED_SECRET: ${SSO_SHARED_SECRET:?SSO_SHARED_SECRET is required}
+      SSO_ISSUER: ${SSO_ISSUER:-toporeduce}
+      SSO_AUDIENCE: ${SSO_AUDIENCE:-upstream-ops}
+      SSO_PARENT_ORIGIN: ${SSO_PARENT_ORIGIN:?SSO_PARENT_ORIGIN is required}
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-8418}:8418"
+    volumes:
+      - ./data:/app/data
+    networks:
+      toporeduce:
+        aliases:
+          - upstream-ops
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8418/healthz >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 20s
+
+networks:
+  toporeduce:
+    external: true
+    name: ${TOPOREDUCE_NETWORK:-new-api_new-api-network}
