@@ -318,6 +318,82 @@ func TestGetCosts(t *testing.T) {
 	}
 }
 
+func TestGetBalanceIgnoresStatusRechargePrice(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota_per_unit":500000,"price":7.3}}`))
+	})
+	mux.HandleFunc("/api/user/self", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota":4570000}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	res, err := c.GetBalance(context.Background(), &connector.Channel{
+		SiteURL: srv.URL,
+	}, &connector.AuthSession{
+		Cookie: "session=1",
+		UserID: "245",
+	})
+	if err != nil {
+		t.Fatalf("GetBalance: %v", err)
+	}
+	if res.Balance != 9.14 {
+		t.Fatalf("balance = %v, want 9.14", res.Balance)
+	}
+}
+
+func TestGetBalanceAppliesManualRechargeMultiplier(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota_per_unit":500000,"price":7.3}}`))
+	})
+	mux.HandleFunc("/api/user/self", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota":4570000}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	multiplier := 2.0
+	res, err := c.GetBalance(context.Background(), &connector.Channel{
+		SiteURL:                srv.URL,
+		RechargeMultiplier:     &multiplier,
+		RechargeMultiplierMode: connector.RechargeMultiplierModeDivide,
+	}, &connector.AuthSession{Cookie: "session=1", UserID: "245"})
+	if err != nil {
+		t.Fatalf("GetBalance: %v", err)
+	}
+	if res.Balance != 4.57 {
+		t.Fatalf("balance = %v, want 4.57", res.Balance)
+	}
+}
+
+func TestRedeemCodeIgnoresStatusRechargePrice(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota_per_unit":500000,"price":7.3}}`))
+	})
+	mux.HandleFunc("/api/user/topup", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":4570000}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New()
+	res, err := c.RedeemCode(context.Background(), &connector.Channel{SiteURL: srv.URL}, &connector.AuthSession{
+		Cookie: "session=1",
+		UserID: "245",
+	}, "code")
+	if err != nil {
+		t.Fatalf("RedeemCode: %v", err)
+	}
+	if res.Value != 9.14 {
+		t.Fatalf("redeem value = %v, want 9.14", res.Value)
+	}
+}
+
 func TestGetCostsAppliesManualRechargeMultiplier(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -353,13 +429,13 @@ func TestGetCostsAppliesManualRechargeMultiplier(t *testing.T) {
 	}
 }
 
-func TestGetCostsAppliesUpstreamRechargeMultiplier(t *testing.T) {
+func TestGetCostsIgnoresStatusRechargePrice(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota_per_unit":500000,"price":7.2}}`))
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota_per_unit":500000,"price":7.3}}`))
 	})
 	mux.HandleFunc("/api/log/self/stat", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota":1000000}}`))
+		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota":1250000}}`))
 	})
 	mux.HandleFunc("/api/user/self", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"used_quota":5000000}}`))
@@ -378,11 +454,11 @@ func TestGetCostsAppliesUpstreamRechargeMultiplier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCosts: %v", err)
 	}
-	if res.TodayCost != 14.4 {
-		t.Fatalf("today cost = %v, want 14.4", res.TodayCost)
+	if res.TodayCost != 2.5 {
+		t.Fatalf("today cost = %v, want 2.5", res.TodayCost)
 	}
-	if res.TotalCost != 72 {
-		t.Fatalf("total cost = %v, want 72", res.TotalCost)
+	if res.TotalCost != 10 {
+		t.Fatalf("total cost = %v, want 10", res.TotalCost)
 	}
 }
 

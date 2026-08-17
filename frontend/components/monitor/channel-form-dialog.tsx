@@ -173,7 +173,11 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
       if (rechargeMultiplierText) {
         rechargeMultiplier = Number(rechargeMultiplierText)
         if (!Number.isFinite(rechargeMultiplier) || rechargeMultiplier <= 0) {
-          throw new Error("充值倍率必须大于 0，或留空跟随上游")
+          throw new Error(
+            form.type === "sub2api"
+              ? "充值倍率必须大于 0，或留空跟随上游"
+              : "充值倍率必须大于 0，或留空不换算",
+          )
         }
       }
       const loginExtraParams = isTokenMode ? "" : form.login_extra_params.trim()
@@ -641,7 +645,9 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label htmlFor="recharge-multiplier">充值倍率（留空 = 跟随上游）</Label>
+              <Label htmlFor="recharge-multiplier">
+                充值倍率（留空 = {form.type === "sub2api" ? "跟随上游" : "不换算"}）
+              </Label>
               <Input
                 id="recharge-multiplier"
                 type="number"

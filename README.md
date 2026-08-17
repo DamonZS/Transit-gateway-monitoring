@@ -109,7 +109,7 @@ UpstreamOps focuses on these problems:
 - Displays balance history trends.
 - Pushes notifications when balance falls below the configured threshold.
 - Supports cooldown for repeated low-balance alerts.
-- Supports recharge multiplier conversion for balance, spending, and redeem values, using either the upstream multiplier or a manual divide/multiply mode.
+- Supports recharge multiplier conversion for balance, spending, and redeem values. Sub2API can follow its upstream multiplier; NewAPI leaves values unconverted when the field is empty. Both support an explicit divide/multiply mode.
 
 ### Rate Monitoring
 

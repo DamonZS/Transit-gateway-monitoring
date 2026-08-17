@@ -112,7 +112,7 @@ function rechargeMultiplierTip(c: Channel) {
   if (c.recharge_multiplier != null && c.recharge_multiplier > 0) {
     return `充值倍率：${decimal(c.recharge_multiplier, 4)}（${mode}）`
   }
-  return `充值倍率：跟随上游（${mode}）`
+  return c.type === "sub2api" ? `充值倍率：跟随上游（${mode}）` : `充值倍率：未设置（不换算）`
 }
 
 /** ratioTone 按倍率给 chip 上色，与 ChannelRatesPanel 共用同一套规则。 */
