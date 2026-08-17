@@ -650,6 +650,15 @@ func channelRates(c *gin.Context, d *Deps) {
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
+	if managed, findErr := d.Channels.FindByID(id); findErr == nil {
+		filtered := make([]storage.RateSnapshot, 0, len(list))
+		for _, snap := range list {
+			if channel.AllowsManagedGroup(managed, snap.ModelName) {
+				filtered = append(filtered, snap)
+			}
+		}
+		list = filtered
+	}
 	// ?only_with_keys=1：仅返回"已创建密钥的分组"。
 	// 该参数由前端按渠道开关 channel.only_created_key_groups_enabled 拼接，
 	// 网关 / 通知设置等全量场景不传该参数，仍返回完整 RateSnapshot。

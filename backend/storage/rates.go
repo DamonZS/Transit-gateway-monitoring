@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strconv"
 	"time"
 
 	"gorm.io/gorm"
@@ -172,7 +173,7 @@ func (r *Rates) CostHistory(channelID uint, limit int) ([]CostSnapshot, error) {
 	return list, nil
 }
 
-// DailyAggregate 一天的聚合余额（所有渠道之和）。
+// DailyAggregate 一天的聚合余额（同一上游站点只计一次）。
 type DailyAggregate struct {
 	Day     time.Time `json:"day"`
 	Balance float64   `json:"balance"`
@@ -184,9 +185,9 @@ type DailyCostAggregate struct {
 	Cost float64   `json:"cost"`
 }
 
-// AggregateBalanceTrend 取最近 N 天的"日内最后一次余额"按渠道之和，作为总余额趋势。
+// AggregateBalanceTrend 取最近 N 天的"日内最后一次余额"按上游站点之和，作为总余额趋势。
 //
-// 实现：对每个 (channel_id, day) 取该天最后一次 BalanceSnapshot 的余额，再按 day 求和，
+// 实现：对每个 (site_url, day) 取该天最后一次 BalanceSnapshot 的余额，再按 day 求和，
 // 然后补齐窗口内缺失的日期。窗口内完全没有采样时返回空数组。
 func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 	if days <= 0 {
@@ -206,15 +207,32 @@ func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 		return []DailyAggregate{}, nil
 	}
 
+	var channels []Channel
+	if err := r.db.Select("id", "site_url").Find(&channels).Error; err != nil {
+		return nil, err
+	}
+	siteKeyByChannel := make(map[uint]string, len(channels))
+	for _, channel := range channels {
+		siteKey := NormalizeSiteURL(channel.SiteURL)
+		if siteKey == "" {
+			siteKey = "channel:" + strconv.FormatUint(uint64(channel.ID), 10)
+		}
+		siteKeyByChannel[channel.ID] = siteKey
+	}
+
 	type key struct {
-		ChannelID uint
-		Day       time.Time
+		SiteKey string
+		Day     time.Time
 	}
 
 	latest := make(map[key]BalanceSnapshot, len(snapshots))
 	for _, snapshot := range snapshots {
 		day := dayStart(snapshot.SampledAt)
-		latest[key{ChannelID: snapshot.ChannelID, Day: day}] = snapshot
+		siteKey := siteKeyByChannel[snapshot.ChannelID]
+		if siteKey == "" {
+			siteKey = "channel:" + strconv.FormatUint(uint64(snapshot.ChannelID), 10)
+		}
+		latest[key{SiteKey: siteKey, Day: day}] = snapshot
 	}
 
 	byDay := make(map[string]float64, days)

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/bejix/upstream-ops/backend/storage"
 	"github.com/gin-gonic/gin"
 )
 
@@ -44,6 +45,7 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 	var totalCost float64
 	var lowest *dashboardLowest
 	var activeCount, failedCount int
+	latestBalanceBySite := make(map[string]storage.Channel, len(channels))
 
 	for _, ch := range channels {
 		stat := dashboardChannelStat{
@@ -63,10 +65,15 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 			activeCount++
 		}
 		if ch.LastBalance != nil {
-			totalBalance += *ch.LastBalance
-			if lowest == nil || (lowest.Balance == nil) || (*ch.LastBalance < *lowest.Balance) {
-				bal := *ch.LastBalance
-				lowest = &dashboardLowest{ChannelID: ch.ID, Name: ch.Name, Balance: &bal}
+			siteKey := storage.NormalizeSiteURL(ch.SiteURL)
+			if siteKey == "" {
+				siteKey = "channel:" + strconv.FormatUint(uint64(ch.ID), 10)
+			}
+			current, exists := latestBalanceBySite[siteKey]
+			if !exists ||
+				(current.LastBalanceAt == nil && ch.LastBalanceAt != nil) ||
+				(current.LastBalanceAt != nil && ch.LastBalanceAt != nil && ch.LastBalanceAt.After(*current.LastBalanceAt)) {
+				latestBalanceBySite[siteKey] = ch
 			}
 		}
 		if ch.TodayCost != nil {
@@ -74,6 +81,13 @@ func dashboardSummary(c *gin.Context, d *Deps) {
 		}
 		if ch.TotalCost != nil {
 			totalCost += *ch.TotalCost
+		}
+	}
+	for _, ch := range latestBalanceBySite {
+		totalBalance += *ch.LastBalance
+		if lowest == nil || lowest.Balance == nil || *ch.LastBalance < *lowest.Balance {
+			balance := *ch.LastBalance
+			lowest = &dashboardLowest{ChannelID: ch.ID, Name: ch.Name, Balance: &balance}
 		}
 	}
 

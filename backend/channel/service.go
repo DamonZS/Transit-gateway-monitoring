@@ -150,6 +150,7 @@ type CreateInput struct {
 	ManagedSource               string
 	ManagedExternalID           string
 	ManagedLocalChannelIDs      []int
+	ManagedGroups               []string
 	Type                        storage.ChannelType
 	SiteURL                     string
 	Username                    string
@@ -203,6 +204,7 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 		ManagedSource:               managedSource,
 		ManagedExternalID:           managedExternalID,
 		ManagedLocalChannelIDs:      append([]int(nil), in.ManagedLocalChannelIDs...),
+		ManagedGroups:               NormalizeManagedGroups(in.ManagedGroups),
 		Type:                        in.Type,
 		SiteURL:                     in.SiteURL,
 		Username:                    in.Username,
@@ -237,6 +239,7 @@ type UpdateInput struct {
 	Type                        *storage.ChannelType
 	ManagedExternalID           *string
 	ManagedLocalChannelIDs      *[]int
+	ManagedGroups               *[]string
 	SiteURL                     *string
 	Username                    *string
 	SortOrder                   *int
@@ -278,6 +281,9 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	}
 	if in.ManagedLocalChannelIDs != nil {
 		c.ManagedLocalChannelIDs = append([]int(nil), (*in.ManagedLocalChannelIDs)...)
+	}
+	if in.ManagedGroups != nil {
+		c.ManagedGroups = NormalizeManagedGroups(*in.ManagedGroups)
 	}
 	if in.SiteURL != nil {
 		invalidateSession = invalidateSession || c.SiteURL != *in.SiteURL
@@ -407,6 +413,31 @@ func normalizeSortOrder(v int) int {
 		return 1
 	}
 	return v
+}
+
+// NormalizeManagedGroups trims and deduplicates managed group names without
+// changing their case, because group identifiers are case-sensitive.
+func NormalizeManagedGroups(groups []string) []string {
+	if groups == nil {
+		return nil
+	}
+	if len(groups) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(groups))
+	out := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		if _, exists := seen[group]; exists {
+			continue
+		}
+		seen[group] = struct{}{}
+		out = append(out, group)
+	}
+	return out
 }
 
 func normalizeLoginExtraParams(raw string) (string, error) {

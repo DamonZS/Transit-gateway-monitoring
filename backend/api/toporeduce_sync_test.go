@@ -187,6 +187,101 @@ func TestToporeduceChannelSyncCreatesManagedChannelIdempotently(t *testing.T) {
 	}
 }
 
+func TestToporeduceChannelSyncFiltersRatesToAssignedGroups(t *testing.T) {
+	router, deps := newToporeduceSyncTestServer(t)
+	rec := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, `{
+		"source":"toporeduce",
+		"channels":[{
+			"external_id":"toporeduce:price-monitor-channel:77",
+			"name":"Scoped channel",
+			"type":"newapi",
+			"site_url":"https://scoped.example.com",
+			"username":"ops@example.com",
+			"credential_mode":"password",
+			"password":"secret",
+			"monitor_enabled":true,
+			"local_channel_ids":[77],
+			"groups":["GPT-Pro"]
+		}]
+	}`)
+	if rec.Code != http.StatusOK || decodeToporeduceSyncSummary(t, rec).Created != 1 {
+		t.Fatalf("sync status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	channels := listToporeduceSyncTestChannels(t, router)
+	if len(channels) != 1 {
+		t.Fatalf("channels = %#v", channels)
+	}
+	if _, err := deps.Rates.Upsert(&storage.RateSnapshot{ChannelID: channels[0].ID, ModelName: "GPT-Pro", Ratio: 0.9, LastSeenAt: time.Now()}); err != nil {
+		t.Fatalf("seed allowed rate: %v", err)
+	}
+	if _, err := deps.Rates.Upsert(&storage.RateSnapshot{ChannelID: channels[0].ID, ModelName: "GPT-Plus", Ratio: 0.6, LastSeenAt: time.Now()}); err != nil {
+		t.Fatalf("seed unrelated rate: %v", err)
+	}
+
+	token := toporeduceSyncTestAdminToken(t, router)
+	rates := performToporeduceSyncAdminRequest(t, router, token, http.MethodGet,
+		"/api/channels/"+fmt.Sprint(channels[0].ID)+"/rates", "")
+	if rates.Code != http.StatusOK {
+		t.Fatalf("rates status = %d, body = %s", rates.Code, rates.Body.String())
+	}
+	var response struct {
+		Data []storage.RateSnapshot `json:"data"`
+	}
+	if err := json.Unmarshal(rates.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode rates: %v", err)
+	}
+	if len(response.Data) != 1 || response.Data[0].ModelName != "GPT-Pro" {
+		t.Fatalf("rates = %#v, want only GPT-Pro", response.Data)
+	}
+}
+
+func TestToporeduceChannelSyncExplicitEmptyGroupsClearsLegacyAllGroupsCompatibility(t *testing.T) {
+	router, deps := newToporeduceSyncTestServer(t)
+	base := `{
+		"source":"toporeduce",
+		"channels":[{
+			"external_id":"toporeduce:price-monitor-channel:88",
+			"name":"Legacy group channel",
+			"type":"newapi",
+			"site_url":"https://legacy-groups.example.com",
+			"username":"ops@example.com",
+			"credential_mode":"password",
+			"password":"secret",
+			"monitor_enabled":true,
+			"local_channel_ids":[88]
+		}]
+	}`
+	created := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, base)
+	if created.Code != http.StatusOK || decodeToporeduceSyncSummary(t, created).Created != 1 {
+		t.Fatalf("legacy sync status = %d, body = %s", created.Code, created.Body.String())
+	}
+	channels := listToporeduceSyncTestChannels(t, router)
+	if len(channels) != 1 {
+		t.Fatalf("channels = %#v", channels)
+	}
+	id := channels[0].ID
+	stored, err := deps.Channels.FindByID(id)
+	if err != nil {
+		t.Fatalf("load created channel: %v", err)
+	}
+	if stored.ManagedGroups != nil {
+		t.Fatalf("legacy managed groups = %#v, want nil", stored.ManagedGroups)
+	}
+
+	cleared := strings.Replace(base, `"local_channel_ids":[88]`, `"local_channel_ids":[88],"groups":[]`, 1)
+	updated := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, cleared)
+	if updated.Code != http.StatusOK || decodeToporeduceSyncSummary(t, updated).Updated != 1 {
+		t.Fatalf("empty groups sync status = %d, body = %s", updated.Code, updated.Body.String())
+	}
+	stored, err = deps.Channels.FindByID(id)
+	if err != nil {
+		t.Fatalf("load cleared channel: %v", err)
+	}
+	if stored.ManagedGroups == nil || len(stored.ManagedGroups) != 0 {
+		t.Fatalf("managed groups after explicit clear = %#v, want non-nil empty", stored.ManagedGroups)
+	}
+}
+
 func TestToporeduceChannelSyncMigratesLegacySiteCardIntoOneLocalChannel(t *testing.T) {
 	router, deps := newToporeduceSyncTestServer(t)
 	legacy := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, `{
@@ -774,15 +869,16 @@ func decodeToporeduceSyncSummary(t *testing.T, rec *httptest.ResponseRecorder) t
 }
 
 type toporeduceSyncTestChannel struct {
-	ID                     uint   `json:"id"`
-	Name                   string `json:"name"`
-	Type                   string `json:"type"`
-	SiteURL                string `json:"site_url"`
-	UserID                 string `json:"user_id"`
-	ManagedSource          string `json:"managed_source"`
-	ManagedExternalID      string `json:"managed_external_id"`
-	ManagedLocalChannelIDs []int  `json:"managed_local_channel_ids"`
-	MonitorEnabled         bool   `json:"monitor_enabled"`
+	ID                     uint     `json:"id"`
+	Name                   string   `json:"name"`
+	Type                   string   `json:"type"`
+	SiteURL                string   `json:"site_url"`
+	UserID                 string   `json:"user_id"`
+	ManagedSource          string   `json:"managed_source"`
+	ManagedExternalID      string   `json:"managed_external_id"`
+	ManagedLocalChannelIDs []int    `json:"managed_local_channel_ids"`
+	ManagedGroups          []string `json:"managed_groups"`
+	MonitorEnabled         bool     `json:"monitor_enabled"`
 }
 
 func listToporeduceSyncTestChannels(t *testing.T, router http.Handler) []toporeduceSyncTestChannel {

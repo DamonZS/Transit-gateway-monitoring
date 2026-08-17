@@ -192,6 +192,13 @@ func (s *Service) refreshRates(ctx context.Context, c *storage.Channel, batch *n
 		s.notifyError(ctx, c, storage.EventMonitorFailed, "倍率采集失败", err)
 		return err
 	}
+	filteredResults := make([]connector.RateResult, 0, len(results))
+	for _, result := range results {
+		if channel.AllowsManagedGroup(c, result.ModelName) {
+			filteredResults = append(filteredResults, result)
+		}
+	}
+	results = filteredResults
 
 	now := time.Now()
 	existing, err := s.rates.ListByChannel(c.ID)

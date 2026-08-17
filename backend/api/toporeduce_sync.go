@@ -20,19 +20,20 @@ type toporeduceChannelSyncRequest struct {
 }
 
 type toporeduceChannelSyncInput struct {
-	ExternalID       string `json:"external_id"`
-	SyncError        string `json:"sync_error"`
-	Name             string `json:"name"`
-	Type             string `json:"type"`
-	SiteURL          string `json:"site_url"`
-	Username         string `json:"username"`
-	SortOrder        int    `json:"sort_order"`
-	CredentialMode   string `json:"credential_mode"`
-	Password         string `json:"password"`
-	TokenCredential  string `json:"token_credential"`
-	LoginExtraParams string `json:"login_extra_params"`
-	MonitorEnabled   bool   `json:"monitor_enabled"`
-	LocalChannelIDs  []int  `json:"local_channel_ids"`
+	ExternalID       string    `json:"external_id"`
+	SyncError        string    `json:"sync_error"`
+	Name             string    `json:"name"`
+	Type             string    `json:"type"`
+	SiteURL          string    `json:"site_url"`
+	Username         string    `json:"username"`
+	SortOrder        int       `json:"sort_order"`
+	CredentialMode   string    `json:"credential_mode"`
+	Password         string    `json:"password"`
+	TokenCredential  string    `json:"token_credential"`
+	LoginExtraParams string    `json:"login_extra_params"`
+	MonitorEnabled   bool      `json:"monitor_enabled"`
+	LocalChannelIDs  []int     `json:"local_channel_ids"`
+	Groups           *[]string `json:"groups"`
 }
 
 type toporeduceChannelSyncError struct {
@@ -179,6 +180,10 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 		return "", fmt.Errorf("unsupported channel type %q", input.Type)
 	}
 	localChannelIDs := normalizeLocalChannelIDs(input.LocalChannelIDs)
+	managedGroups := []string(nil)
+	if input.Groups != nil {
+		managedGroups = channel.NormalizeManagedGroups(*input.Groups)
+	}
 	existing, err := d.Channels.FindManaged(source, externalID)
 	if err != nil {
 		return "", err
@@ -225,6 +230,7 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 			ManagedSource:          source,
 			ManagedExternalID:      externalID,
 			ManagedLocalChannelIDs: localChannelIDs,
+			ManagedGroups:          managedGroups,
 			Type:                   channelType,
 			SiteURL:                siteURL,
 			Username:               strings.TrimSpace(input.Username),
@@ -278,6 +284,13 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 		value := append([]int(nil), localChannelIDs...)
 		update.ManagedLocalChannelIDs = &value
 		changed = true
+	}
+	if input.Groups != nil {
+		if existing.ManagedGroups == nil || !slices.Equal(existing.ManagedGroups, managedGroups) {
+			value := append([]string{}, managedGroups...)
+			update.ManagedGroups = &value
+			changed = true
+		}
 	}
 	existingMode := existing.CredentialMode
 	if existingMode == "" {

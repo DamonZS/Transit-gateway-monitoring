@@ -104,7 +104,7 @@ func TestRefreshRatesSyncAnnouncementsAndNotify(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"quota":1000000,"used_quota":500000}}`))
 		case "/api/user/self/groups":
-			_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"default":{"ratio":1,"desc":"default"}}}`))
+			_, _ = w.Write([]byte(`{"success":true,"message":"","data":{"default":{"ratio":1,"desc":"default"},"unassigned":{"ratio":2,"desc":"unassigned"}}}`))
 		case "/api/notice":
 			_, _ = w.Write([]byte(`{"success":true,"message":"","data":""}`))
 		default:
@@ -113,8 +113,11 @@ func TestRefreshRatesSyncAnnouncementsAndNotify(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
+	managedSource := "toporeduce"
 	ch := &storage.Channel{
 		Name:           "demo",
+		ManagedSource:  &managedSource,
+		ManagedGroups:  []string{"default"},
 		Type:           storage.ChannelTypeNewAPI,
 		SiteURL:        apiSrv.URL,
 		Username:       "u",
@@ -134,6 +137,13 @@ func TestRefreshRatesSyncAnnouncementsAndNotify(t *testing.T) {
 
 	if err := svc.RefreshRates(context.Background(), ch); err != nil {
 		t.Fatalf("first refresh: %v", err)
+	}
+	firstRates, err := rates.ListByChannel(ch.ID)
+	if err != nil {
+		t.Fatalf("list first rates: %v", err)
+	}
+	if len(firstRates) != 1 || firstRates[0].ModelName != "default" {
+		t.Fatalf("managed group filter stored rates = %#v", firstRates)
 	}
 	if got := webhookHits.Load(); got != 0 {
 		t.Fatalf("first refresh webhook hits = %d, want 0", got)

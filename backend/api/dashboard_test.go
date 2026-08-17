@@ -137,6 +137,101 @@ func TestDashboardSummaryIncludesCosts(t *testing.T) {
 	}
 }
 
+func TestDashboardSummaryDeduplicatesBalanceBySite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := openTestDB(t)
+	channels := storage.NewChannels(db)
+	rates := storage.NewRates(db)
+
+	older := time.Now().Add(-time.Hour)
+	newer := time.Now()
+	oldBalance := 1.0
+	newBalance := 12.0
+	otherBalance := 5.0
+	items := []storage.Channel{
+		{
+			Name:           "same-site-old",
+			Type:           storage.ChannelTypeNewAPI,
+			SiteURL:        "https://SAME.example.com/",
+			Username:       "u1",
+			PasswordCipher: "x",
+			MonitorEnabled: true,
+			LastBalance:    &oldBalance,
+			LastBalanceAt:  &older,
+		},
+		{
+			Name:           "same-site-new",
+			Type:           storage.ChannelTypeNewAPI,
+			SiteURL:        "https://same.example.com",
+			Username:       "u1",
+			PasswordCipher: "x",
+			MonitorEnabled: true,
+			LastBalance:    &newBalance,
+			LastBalanceAt:  &newer,
+		},
+		{
+			Name:           "other-site",
+			Type:           storage.ChannelTypeSub2API,
+			SiteURL:        "https://other.example.com",
+			Username:       "u2",
+			PasswordCipher: "y",
+			MonitorEnabled: true,
+			LastBalance:    &otherBalance,
+			LastBalanceAt:  &newer,
+		},
+	}
+	for index := range items {
+		if err := channels.Create(&items[index]); err != nil {
+			t.Fatalf("create channel %d: %v", index, err)
+		}
+	}
+
+	r := gin.New()
+	api := r.Group("/api")
+	registerDashboard(api, &Deps{Channels: channels, Rates: rates})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/summary", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			TotalBalance  float64 `json:"total_balance"`
+			LowestBalance struct {
+				Name    string  `json:"name"`
+				Balance float64 `json:"balance"`
+			} `json:"lowest_balance"`
+			Channels []struct {
+				Name        string  `json:"name"`
+				LastBalance float64 `json:"last_balance"`
+			} `json:"channels"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Data.TotalBalance != 17 {
+		t.Fatalf("total balance = %v, want 17", resp.Data.TotalBalance)
+	}
+	if resp.Data.LowestBalance.Name != "other-site" || resp.Data.LowestBalance.Balance != 5 {
+		t.Fatalf("lowest balance = %#v, want other-site at 5", resp.Data.LowestBalance)
+	}
+	if len(resp.Data.Channels) != 3 {
+		t.Fatalf("channels len = %d, want 3", len(resp.Data.Channels))
+	}
+	balances := make(map[string]float64, len(resp.Data.Channels))
+	for _, item := range resp.Data.Channels {
+		balances[item.Name] = item.LastBalance
+	}
+	if balances["same-site-old"] != 1 || balances["same-site-new"] != 12 {
+		t.Fatalf("per-channel balances changed: %#v", balances)
+	}
+}
+
 func TestNotificationsLogsPage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

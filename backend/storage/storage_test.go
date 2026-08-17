@@ -83,6 +83,47 @@ func TestAggregateBalanceTrend(t *testing.T) {
 	}
 }
 
+func TestAggregateBalanceTrendDeduplicatesChannelsBySite(t *testing.T) {
+	db := openTestDB(t)
+	channels := NewChannels(db)
+	rates := NewRates(db)
+
+	items := []Channel{
+		{Name: "same-site-a", Type: ChannelTypeNewAPI, SiteURL: "https://SAME.example.com/", Username: "u", PasswordCipher: "x", MonitorEnabled: true},
+		{Name: "same-site-b", Type: ChannelTypeNewAPI, SiteURL: "https://same.example.com", Username: "u", PasswordCipher: "x", MonitorEnabled: true},
+		{Name: "other-site", Type: ChannelTypeSub2API, SiteURL: "https://other.example.com", Username: "u", PasswordCipher: "x", MonitorEnabled: true},
+	}
+	for index := range items {
+		if err := channels.Create(&items[index]); err != nil {
+			t.Fatalf("create channel %d: %v", index, err)
+		}
+	}
+
+	now := time.Now().In(trendLocation)
+	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, trendLocation)
+	snapshots := []BalanceSnapshot{
+		{ChannelID: items[0].ID, Balance: 10, SampledAt: day.Add(9 * time.Hour)},
+		{ChannelID: items[1].ID, Balance: 12, SampledAt: day.Add(10 * time.Hour)},
+		{ChannelID: items[2].ID, Balance: 5, SampledAt: day.Add(11 * time.Hour)},
+	}
+	for index := range snapshots {
+		if err := rates.AppendBalance(&snapshots[index]); err != nil {
+			t.Fatalf("append balance %d: %v", index, err)
+		}
+	}
+
+	got, err := rates.AggregateBalanceTrend(1)
+	if err != nil {
+		t.Fatalf("aggregate balance trend: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("trend len = %d, want 1", len(got))
+	}
+	if got[0].Balance != 17 {
+		t.Fatalf("balance = %v, want 17", got[0].Balance)
+	}
+}
+
 func TestChannelProxyEnabledPersists(t *testing.T) {
 	db := openTestDB(t)
 	channels := NewChannels(db)
