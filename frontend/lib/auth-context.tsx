@@ -45,13 +45,18 @@ interface SSOPublicConfig {
   parent_origin?: string
 }
 
-interface EmbeddedSSOResult {
+interface ParentSSOResult {
   login: LoginResponse
   nonce: string
   parentOrigin: string
+  targetWindow: Window
 }
 
 const EMBEDDED_SSO_TIMEOUT_MS = 12_000
+
+type SSOTarget = {
+  window: Window
+}
 
 function createSSONonce(): string {
   const bytes = new Uint8Array(16)
@@ -59,13 +64,27 @@ function createSSONonce(): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")
 }
 
-function embeddedSSOEnabled(): boolean {
-  if (window.parent === window) return false
-  return new URLSearchParams(window.location.search).get("embed") === "1"
+function getSSOTarget(): SSOTarget | null {
+  // Preserve the explicit iframe opt-in. A standalone window opened from
+  // Toporeduce instead relies on window.opener, which is unavailable when a
+  // user navigates to UpstreamOps directly.
+  if (
+    window.parent !== window &&
+    new URLSearchParams(window.location.search).get("embed") === "1"
+  ) {
+    return { window: window.parent }
+  }
+
+  if (window.opener && !window.opener.closed) {
+    return { window: window.opener }
+  }
+
+  return null
 }
 
-async function tryEmbeddedSSO(parentSignal: AbortSignal): Promise<EmbeddedSSOResult | null> {
-  if (!embeddedSSOEnabled() || parentSignal.aborted) return null
+async function tryParentSSO(parentSignal: AbortSignal): Promise<ParentSSOResult | null> {
+  const target = getSSOTarget()
+  if (!target || parentSignal.aborted) return null
 
   const controller = new AbortController()
   const abort = () => controller.abort()
@@ -97,11 +116,11 @@ async function tryEmbeddedSSO(parentSignal: AbortSignal): Promise<EmbeddedSSORes
     }
 
     const nonce = createSSONonce()
-    return await new Promise<EmbeddedSSOResult | null>((resolve) => {
+    return await new Promise<ParentSSOResult | null>((resolve) => {
       let settled = false
       let exchanging = false
 
-      const finish = (result: EmbeddedSSOResult | null) => {
+      const finish = (result: ParentSSOResult | null) => {
         if (settled) return
         settled = true
         window.removeEventListener("message", onMessage)
@@ -110,7 +129,7 @@ async function tryEmbeddedSSO(parentSignal: AbortSignal): Promise<EmbeddedSSORes
       }
       const onAbort = () => finish(null)
       const onMessage = async (event: MessageEvent) => {
-        if (exchanging || event.source !== window.parent || event.origin !== parentOrigin) return
+        if (exchanging || event.source !== target.window || event.origin !== parentOrigin) return
         if (!event.data || typeof event.data !== "object") return
         const message = event.data as {
           type?: unknown
@@ -135,10 +154,10 @@ async function tryEmbeddedSSO(parentSignal: AbortSignal): Promise<EmbeddedSSORes
             skipAuthErrorHandler: true,
           })
           if (!login.token) throw new Error("SSO exchange returned no token")
-          finish({ login, nonce, parentOrigin })
+          finish({ login, nonce, parentOrigin, targetWindow: target.window })
         } catch {
           if (!controller.signal.aborted) {
-            window.parent.postMessage(
+            target.window.postMessage(
               { type: "upstream-ops:sso-error", payload: { nonce } },
               parentOrigin,
             )
@@ -149,7 +168,7 @@ async function tryEmbeddedSSO(parentSignal: AbortSignal): Promise<EmbeddedSSORes
 
       controller.signal.addEventListener("abort", onAbort, { once: true })
       window.addEventListener("message", onMessage)
-      window.parent.postMessage(
+      target.window.postMessage(
         { type: "upstream-ops:sso-ready", payload: { nonce } },
         parentOrigin,
       )
@@ -192,16 +211,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStatus("authenticated")
       } catch {
         if (cancelled) return
-        // me 失败：清理无效 token，再尝试仅用于嵌入页的 Toporeduce SSO。
+        // me 失败：清理无效 token，再尝试 Toporeduce iframe/opener SSO。
         setToken(null)
-        const sso = await tryEmbeddedSSO(controller.signal)
+        const sso = await tryParentSSO(controller.signal)
         if (cancelled) return
         if (sso?.login.token) {
           setToken(sso.login.token)
           setAuthDisabled(false)
           setUsername(sso.login.username)
           setStatus("authenticated")
-          window.parent.postMessage(
+          sso.targetWindow.postMessage(
             { type: "upstream-ops:sso-complete", payload: { nonce: sso.nonce } },
             sso.parentOrigin,
           )

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bejix/upstream-ops/backend/channel"
@@ -47,6 +48,11 @@ type toporeduceChannelSyncSummary struct {
 	Failed    int                          `json:"failed"`
 	Errors    []toporeduceChannelSyncError `json:"errors,omitempty"`
 }
+
+const (
+	toporeduceLegacySiteExternalIDPrefix = "toporeduce:price-monitor-site:"
+	toporeduceChannelExternalIDPrefix    = "toporeduce:price-monitor-channel:"
+)
 
 func registerToporeduceIntegration(g *gin.RouterGroup, d *Deps) {
 	g.POST("/integrations/toporeduce/channels/sync", func(c *gin.Context) {
@@ -172,9 +178,18 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 	if channelType != storage.ChannelTypeNewAPI && channelType != storage.ChannelTypeSub2API {
 		return "", fmt.Errorf("unsupported channel type %q", input.Type)
 	}
+	localChannelIDs := normalizeLocalChannelIDs(input.LocalChannelIDs)
 	existing, err := d.Channels.FindManaged(source, externalID)
 	if err != nil {
 		return "", err
+	}
+	migratingLegacy := false
+	if existing == nil {
+		existing, err = findLegacyToporeduceSiteChannel(d.Channels, source, externalID, siteURL, channelType)
+		if err != nil {
+			return "", err
+		}
+		migratingLegacy = existing != nil
 	}
 	currentID := uint(0)
 	if existing != nil {
@@ -196,7 +211,6 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 	if err != nil {
 		return "", err
 	}
-	localChannelIDs := normalizeLocalChannelIDs(input.LocalChannelIDs)
 	sortOrder := input.SortOrder
 	if sortOrder == 0 {
 		sortOrder = 1
@@ -229,6 +243,11 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 
 	update := channel.UpdateInput{}
 	changed := false
+	if migratingLegacy {
+		value := externalID
+		update.ManagedExternalID = &value
+		changed = true
+	}
 	setString := func(current, desired string, target **string) {
 		if current != desired {
 			value := desired
@@ -292,6 +311,43 @@ func upsertToporeduceChannel(d *Deps, source string, input toporeduceChannelSync
 		return "", err
 	}
 	return "updated", nil
+}
+
+func findLegacyToporeduceSiteChannel(
+	channels *storage.Channels,
+	source string,
+	externalID string,
+	siteURL string,
+	channelType storage.ChannelType,
+) (*storage.Channel, error) {
+	localChannelID, ok := toporeduceLocalChannelID(externalID)
+	if !ok {
+		return nil, nil
+	}
+	managed, err := channels.ListManaged(source)
+	if err != nil {
+		return nil, err
+	}
+	for index := range managed {
+		candidate := &managed[index]
+		if candidate.ManagedExternalID == nil ||
+			!strings.HasPrefix(*candidate.ManagedExternalID, toporeduceLegacySiteExternalIDPrefix) ||
+			candidate.Type != channelType ||
+			strings.TrimRight(strings.TrimSpace(candidate.SiteURL), "/") != siteURL ||
+			!slices.Contains(candidate.ManagedLocalChannelIDs, localChannelID) {
+			continue
+		}
+		return candidate, nil
+	}
+	return nil, nil
+}
+
+func toporeduceLocalChannelID(externalID string) (int, bool) {
+	if !strings.HasPrefix(externalID, toporeduceChannelExternalIDPrefix) {
+		return 0, false
+	}
+	value, err := strconv.Atoi(strings.TrimPrefix(externalID, toporeduceChannelExternalIDPrefix))
+	return value, err == nil && value > 0
 }
 
 func toporeduceCredential(mode storage.CredentialMode, input toporeduceChannelSyncInput) (string, bool, error) {

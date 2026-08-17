@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,119 @@ func TestToporeduceChannelSyncCreatesManagedChannelIdempotently(t *testing.T) {
 	if len(channels[0].ManagedLocalChannelIDs) != 2 || channels[0].ManagedLocalChannelIDs[0] != 22 ||
 		channels[0].ManagedLocalChannelIDs[1] != 33 {
 		t.Fatalf("updated local channel ids = %#v", channels[0].ManagedLocalChannelIDs)
+	}
+}
+
+func TestToporeduceChannelSyncMigratesLegacySiteCardIntoOneLocalChannel(t *testing.T) {
+	router, deps := newToporeduceSyncTestServer(t)
+	legacy := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, `{
+		"source":"toporeduce",
+		"channels":[{
+			"external_id":"toporeduce:price-monitor-site:7",
+			"name":"Shared upstream",
+			"type":"newapi",
+			"site_url":"https://shared.example.com",
+			"username":"ops@example.com",
+			"credential_mode":"password",
+			"password":"shared-password",
+			"monitor_enabled":true,
+			"local_channel_ids":[11,22]
+		}]
+	}`)
+	if legacy.Code != http.StatusOK || decodeToporeduceSyncSummary(t, legacy).Created != 1 {
+		t.Fatalf("legacy sync status = %d, body = %s", legacy.Code, legacy.Body.String())
+	}
+	legacyChannels := listToporeduceSyncTestChannels(t, router)
+	if len(legacyChannels) != 1 {
+		t.Fatalf("legacy channels = %#v", legacyChannels)
+	}
+	legacyID := legacyChannels[0].ID
+	if _, err := deps.Rates.Upsert(&storage.RateSnapshot{
+		ChannelID:  legacyID,
+		ModelName:  "gpt-history",
+		Ratio:      1.25,
+		LastSeenAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed legacy rate history: %v", err)
+	}
+
+	perChannelBody := `{
+		"source":"toporeduce",
+		"channels":[
+			{
+				"external_id":"toporeduce:price-monitor-channel:11",
+				"name":"Local channel 11",
+				"type":"newapi",
+				"site_url":"https://shared.example.com",
+				"username":"ops@example.com",
+				"credential_mode":"password",
+				"password":"shared-password",
+				"monitor_enabled":true,
+				"local_channel_ids":[11]
+			},
+			{
+				"external_id":"toporeduce:price-monitor-channel:22",
+				"name":"Local channel 22",
+				"type":"newapi",
+				"site_url":"https://shared.example.com",
+				"username":"ops@example.com",
+				"credential_mode":"password",
+				"password":"shared-password",
+				"monitor_enabled":true,
+				"local_channel_ids":[22]
+			}
+		]
+	}`
+	migrated := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, perChannelBody)
+	if migrated.Code != http.StatusOK {
+		t.Fatalf("per-channel sync status = %d, body = %s", migrated.Code, migrated.Body.String())
+	}
+	summary := decodeToporeduceSyncSummary(t, migrated)
+	if summary.Created != 1 || summary.Updated != 1 || summary.Disabled != 0 || summary.Failed != 0 {
+		t.Fatalf("migration summary = %#v", summary)
+	}
+
+	channels := listToporeduceSyncTestChannels(t, router)
+	if len(channels) != 2 {
+		t.Fatalf("channels after migration = %#v", channels)
+	}
+	var migratedChannel *toporeduceSyncTestChannel
+	for index := range channels {
+		item := &channels[index]
+		if strings.HasPrefix(item.ManagedExternalID, "toporeduce:price-monitor-site:") {
+			t.Fatalf("legacy site card remained after migration: %#v", item)
+		}
+		if item.ManagedExternalID == "toporeduce:price-monitor-channel:11" {
+			migratedChannel = item
+		}
+	}
+	if migratedChannel == nil || migratedChannel.ID != legacyID || !migratedChannel.MonitorEnabled {
+		t.Fatalf("legacy card was not reused for local channel 11: %#v", channels)
+	}
+	if len(migratedChannel.ManagedLocalChannelIDs) != 1 || migratedChannel.ManagedLocalChannelIDs[0] != 11 {
+		t.Fatalf("migrated local channel ids = %#v", migratedChannel.ManagedLocalChannelIDs)
+	}
+
+	token := toporeduceSyncTestAdminToken(t, router)
+	rates := performToporeduceSyncAdminRequest(t, router, token, http.MethodGet,
+		"/api/channels/"+fmt.Sprint(legacyID)+"/rates", "")
+	if rates.Code != http.StatusOK {
+		t.Fatalf("migrated rates status = %d, body = %s", rates.Code, rates.Body.String())
+	}
+	var ratesResponse struct {
+		Data []storage.RateSnapshot `json:"data"`
+	}
+	if err := json.Unmarshal(rates.Body.Bytes(), &ratesResponse); err != nil {
+		t.Fatalf("decode migrated rates: %v", err)
+	}
+	if len(ratesResponse.Data) != 1 || ratesResponse.Data[0].ModelName != "gpt-history" {
+		t.Fatalf("legacy history was not retained: %#v", ratesResponse.Data)
+	}
+
+	repeated := performToporeduceSync(t, router, "Bearer "+toporeduceSyncTestSecret, perChannelBody)
+	repeatedSummary := decodeToporeduceSyncSummary(t, repeated)
+	if repeated.Code != http.StatusOK || repeatedSummary.Unchanged != 2 || repeatedSummary.Failed != 0 {
+		t.Fatalf("repeated per-channel sync status = %d, summary = %#v", repeated.Code, repeatedSummary)
 	}
 }
 

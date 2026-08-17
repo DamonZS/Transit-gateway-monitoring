@@ -235,6 +235,7 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 type UpdateInput struct {
 	Name                        *string
 	Type                        *storage.ChannelType
+	ManagedExternalID           *string
 	ManagedLocalChannelIDs      *[]int
 	SiteURL                     *string
 	Username                    *string
@@ -267,6 +268,13 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	if in.Type != nil {
 		invalidateSession = invalidateSession || c.Type != *in.Type
 		c.Type = *in.Type
+	}
+	if in.ManagedExternalID != nil {
+		externalID := strings.TrimSpace(*in.ManagedExternalID)
+		if externalID == "" {
+			return nil, errors.New("managed external id cannot be empty")
+		}
+		c.ManagedExternalID = &externalID
 	}
 	if in.ManagedLocalChannelIDs != nil {
 		c.ManagedLocalChannelIDs = append([]int(nil), (*in.ManagedLocalChannelIDs)...)
